@@ -6,7 +6,7 @@ PTAgent 是一个基于 Docker 的自动化渗透测试代理系统。
 
 ### 1. 配置系统
 
-首次使用时，需要进行系统配置。配置图标位于 `doc/config.png`：
+首次使用时，需要进行系统配置。配置文件位于 `configs/dispatch.yaml`：
 
 ![配置](doc/config.png)
 
@@ -28,13 +28,10 @@ docker compose up -d
 - **Origin**：已知的初始信息或起点
 - **Goal**：最终目标
 
-配置界面示例：
-
+### 4. 查看结果
 | 初始状态 | 目标状态 |
 |----------|----------|
 | ![Origin](doc/Origin.png) | ![Goal](doc/Goal.png) |
-
-### 4. 查看结果
 
 任务执行过程中，会自动生成进度图像：
 
