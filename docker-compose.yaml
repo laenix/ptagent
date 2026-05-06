@@ -1,0 +1,47 @@
+services:
+  server:
+    build:
+      context: .
+      target: server
+    image: ptagent-server:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./prompts:/app/prompts
+    command: ["/app/ptagent-server", "--addr", ":8000", "--web", "/app/web/dist"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Dispatcher - scalable via: docker compose up --scale dispatcher=N
+  dispatcher:
+    build:
+      context: .
+      target: dispatcher
+    image: ptagent-dispatcher:latest
+    depends_on:
+      server:
+        condition: service_healthy
+    volumes:
+      - ./configs:/app/configs
+      - ./prompts:/app/prompts
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["/app/ptagent-dispatcher", "--config", "/app/configs/dispatch.yaml"]
+    restart: unless-stopped
+    environment:
+      - PTAGENT_SERVER=http://server:8000
+
+  # Pre-build Kali worker image (used by dispatcher to create containers)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: ptagent-worker:latest
+    profiles:
+      - build-only
+

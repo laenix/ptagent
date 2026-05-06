@@ -1,0 +1,59 @@
+# Dockerfile.worker - Kali-based worker container (Cairn-style)
+# Runs `sleep infinity` — commands executed via docker exec from dispatcher
+
+FROM kalilinux/kali-rolling:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Kali metapackage + pentesting tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    kali-linux-headless \
+    nmap \
+    nikto \
+    netcat-traditional \
+    dnsutils \
+    whois \
+    curl \
+    wget \
+    git \
+    jq \
+    python3 \
+    python3-pip \
+    iputils-ping \
+    net-tools \
+    traceroute \
+    tcpdump \
+    sqlmap \
+    dirb \
+    gobuster \
+    wfuzz \
+    hydra \
+    john \
+    hashcat \
+    smbclient \
+    enum4linux \
+    whatweb \
+    ffuf \
+    coreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python pentesting libraries
+RUN pip3 install --no-cache-dir --break-system-packages \
+    requests \
+    pwntools \
+    beautifulsoup4 \
+    lxml \
+    impacket \
+    paramiko \
+    scapy
+
+# Install nuclei
+RUN curl -sSL https://github.com/projectdiscovery/nuclei/releases/latest/download/nuclei_$(curl -sSL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d v)_linux_amd64.zip -o /tmp/nuclei.zip \
+    && unzip -o /tmp/nuclei.zip -d /usr/local/bin/ \
+    && rm -f /tmp/nuclei.zip \
+    || echo "nuclei install skipped"
+
+WORKDIR /workspace
+
+# Cairn-style: container stays alive, commands executed via docker exec
+CMD ["sleep", "infinity"]

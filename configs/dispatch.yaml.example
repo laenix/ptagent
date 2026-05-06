@@ -1,0 +1,71 @@
+server: "http://127.0.0.1:8000"
+
+# 代理设置（访问靶场时使用）
+proxy:
+  # HTTP/HTTPS 代理地址，留空则不使用代理
+  # 支持 http:// socks5:// socks5h://
+  http_proxy: ""
+  https_proxy: ""
+  socks5_proxy: ""            # 例: "socks5://127.0.0.1:1080"
+  # 不走代理的地址（逗号分隔）
+  no_proxy: "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  # 是否对 LLM API 请求也使用代理（默认 false，仅靶场流量走代理）
+  proxy_llm_api: false
+
+runtime:
+  interval: 3                 # 主循环间隔 + heartbeat 周期（秒）
+  max_workers: 8              # 同时运行的任务总数上限
+  max_running_projects: 3     # 活跃项目上限
+  max_project_workers: 4      # 单项目内并发任务上限
+  healthcheck_timeout: 15     # Worker 健康检查超时（秒）
+  prompt_group: "default"     # Prompt 组目录名
+
+tasks:
+  bootstrap:
+    timeout: 300              # 第一阶段超时（秒）
+    conclude_timeout: 90      # 收尾阶段超时（秒）
+  reason:
+    timeout: 120              # 超时（秒）
+    max_intents: 2            # 单次最大 intent 数
+  explore:
+    timeout: 600              # 第一阶段超时（秒）
+    conclude_timeout: 120     # 收尾阶段超时（秒）
+
+container:
+  enabled: true
+  image: "ptagent-worker:latest"
+  network_mode: "host"
+  completed_action: "stop"    # "remove" | "stop"
+  cap_add:
+    - "NET_RAW"
+    - "NET_ADMIN"
+  #   - "NET_ADMIN"
+  proxy_env:
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    NO_PROXY: "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+common_env:
+  PTAGENT_SERVER: "http://host.docker.internal:8000"
+
+workers:
+  # MiniMax M2.7 高速模型
+  - name: "minimax-reasoner"
+    type: "openai"
+    task_types: [bootstrap, reason]
+    max_running: 2
+    priority: 0
+    env:
+      OPENAI_MODEL: "MiniMax-M2.7-highspeed"
+      OPENAI_BASE_URL: "https://api.minimaxi.com/v1"
+      OPENAI_API_KEY: "sk-cp-"
+
+  - name: "minimax-explorer"
+    type: "openai"
+    task_types: [bootstrap, explore]
+    max_running: 2
+    priority: 1
+    env:
+      OPENAI_MODEL: "MiniMax-M2.7-highspeed"
+      OPENAI_BASE_URL: "https://api.minimaxi.com/v1"
+      OPENAI_API_KEY: "sk-cp-"
