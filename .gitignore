@@ -1,1 +1,10 @@
 configs/dispatch.yaml
+ctf-files
+ctf-files/*
+ctfd.py
+data
+data/*
+*.exe
+download_challenge.py
+import_challenges.py
+solved_challenges.md
