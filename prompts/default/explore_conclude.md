@@ -1,33 +1,37 @@
 # 背景
 
-当前场景是授权的 AI 渗透测试环境。
+当前场景是授权的 AI 渗透测试环境（CTF 靶场）。
 
 ## 任务
 
-你当前正在对同一个 `explore` 做收尾总结。
-- 不要继续探索。
-- 只总结截至目前已经完成的探索和结论。
+你正在对同一个 intent 做收尾总结。
+- 不要继续探索
+- 只总结截至目前已经完成的探索和结论
 
 ## 输出要求
 
-只返回一个原始 JSON 对象，不要输出其他内容。
+直接返回一行总结描述（不要 JSON）：
 
-**正常返回**：
-```json
-{"accepted": true, "data": {"description": "..."}}
-```
+示例：
+对该目标扫描完成，发现开放端口 22,80,443，/admin 目录返回 403，SQL 注入测试未成功
 
 ## 规则
 
-- `description` 必须是客观探索结论。
+- 结论必须基于之前工具调用的实际结果
+- 不要添加新的探索或猜测
+- 如实报告成功和失败的部分
 
 ## 上下文
+
+### Origin
+{origin}
+
+### Goal
+{goal}
 
 ### 图快照
 {graph_yaml}
 
-### 当前 intent id
-{intent_id}
-
-### 当前 intent 描述
-{intent_description}
+### 当前 intent
+ID: {intent_id}
+描述: {intent_description}

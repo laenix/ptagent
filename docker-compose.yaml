@@ -44,4 +44,3 @@ services:
     image: ptagent-worker:latest
     profiles:
       - build-only
-

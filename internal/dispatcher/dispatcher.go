@@ -45,6 +45,7 @@ type Dispatcher struct {
 
 	// 运行状态
 	mu                   sync.Mutex
+	dispatchCond         *sync.Cond               // 任务完成时唤醒调度线程
 	runningTasks         int
 	projectWorkers       map[string]int              // projectID -> running count
 	workerRunning        map[string]int              // worker name -> running count
@@ -52,6 +53,7 @@ type Dispatcher struct {
 	bootstrapping        map[string]bool             // projects currently in bootstrap
 	reasoning            map[string]bool             // projects currently in reason
 	exploringIntents     map[string]bool             // intent IDs currently being explored
+	projectExploring    map[string]bool             // project IDs currently in explore (for direction lock)
 	reasonCheckpoints    map[string]reasonCheckpoint // projectID -> last reason graph snapshot
 	runningTasks_        map[string]*runningTask     // taskKey -> running task (for cancellation)
 	workerUnhealthyUntil map[string]time.Time        // worker name -> unhealthy until
@@ -77,11 +79,13 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 		bootstrapping:        make(map[string]bool),
 		reasoning:            make(map[string]bool),
 		exploringIntents:     make(map[string]bool),
+		projectExploring:     make(map[string]bool),
 		reasonCheckpoints:    make(map[string]reasonCheckpoint),
 		runningTasks_:        make(map[string]*runningTask),
 		workerUnhealthyUntil: make(map[string]time.Time),
 		workerRejectedUntil:  make(map[rejectionKey]time.Time),
 	}
+	d.dispatchCond = sync.NewCond(&d.mu)
 
 	// 初始化容器管理器（如果启用）
 	if cfg.Container.Enabled {
@@ -158,7 +162,20 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 	}
 	d.cancelInactiveTasks(statusByID)
 
-	// 1. 遍历已 admitted 的 active 项目
+	// 计算项目配额：每个项目应该获得的 worker 上限
+	// 公平调度：maxWorkers / maxRunningProjects，向上取整
+	maxProjects := d.cfg.Runtime.MaxRunningProjects
+	if maxProjects <= 0 {
+		maxProjects = 1
+	}
+	quota := (d.cfg.Runtime.MaxWorkers + maxProjects - 1) / maxProjects
+	if quota < 1 {
+		quota = 1
+	}
+
+	dispatched := false
+
+	// 1. 遍历已 admitted 的 active 项目（公平调度）
 	for _, p := range projects {
 		if p.Status != models.ProjectStatusActive {
 			continue
@@ -169,10 +186,22 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 		}
 
 		if !d.canDispatch() {
-			return
+			log.Printf("[dispatcher] cannot dispatch, runningTasks=%d maxWorkers=%d", d.runningTasks, d.cfg.Runtime.MaxWorkers)
+			break
 		}
 
-		d.dispatchForProject(ctx, &p)
+		// 检查项目是否已达配额
+		d.mu.Lock()
+		projectCount := d.projectWorkers[p.ID]
+		d.mu.Unlock()
+		if projectCount >= quota {
+			log.Printf("[dispatcher] project %s已达配额(%d>=%d), 跳过", p.ID, projectCount, quota)
+			continue
+		}
+
+		log.Printf("[dispatcher] 准备为项目 %s 调度, projectCount=%d quota=%d", p.ID, projectCount, quota)
+		d.dispatchForProject(ctx, &p, quota)
+		dispatched = true
 	}
 
 	// 2. admit 新项目
@@ -189,19 +218,43 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 			break
 		}
 	}
+
+	// 3. 如果没有派发任务，等待一段时间让任务完成
+	if !dispatched {
+		d.mu.Lock()
+		if d.runningTasks < d.cfg.Runtime.MaxWorkers {
+			waitInterval := time.Duration(d.cfg.Runtime.Interval) * time.Second
+			log.Printf("[dispatcher] no tasks dispatched, sleeping %v before next round", waitInterval)
+			d.mu.Unlock()
+			time.Sleep(waitInterval)
+		} else {
+			d.mu.Unlock()
+		}
+	}
 }
 
 // dispatchForProject 为单个项目调度任务（可能派发多个 explore）
-func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSummary) {
+// quota: 项目配额，超过则不再派发新任务
+func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSummary, quota int) {
+	log.Printf("[dispatcher] dispatchForProject called: project=%s factCount=%d intentCount=%d", p.ID, p.FactCount, p.IntentCount)
 	d.mu.Lock()
 	projectCount := d.projectWorkers[p.ID]
 	d.mu.Unlock()
 
-	if projectCount >= d.cfg.Runtime.MaxProjectWorkers {
+	// 使用配额和 MaxProjectWorkers 中的较小值作为限制
+	maxAllowed := quota
+	if d.cfg.Runtime.MaxProjectWorkers < maxAllowed {
+		maxAllowed = d.cfg.Runtime.MaxProjectWorkers
+	}
+
+	if projectCount >= maxAllowed {
+		log.Printf("[dispatcher] dispatchForProject: project %s at quota limit (%d >= %d), skipping", p.ID, projectCount, maxAllowed)
 		return
 	}
 
 	// 判断项目状态决定任务类型
+	log.Printf("[dispatcher] dispatchForProject: checking project %s, isInitialState=%v, UnclaimedIntentCount=%d, Reason=%v",
+		p.ID, d.isInitialState(p), p.UnclaimedIntentCount, p.Reason)
 	if d.isInitialState(p) {
 		// Bootstrap - 只派遣一次
 		d.mu.Lock()
@@ -214,7 +267,15 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 			d.dispatchTask(ctx, p.ID, worker.TaskBootstrap)
 		}
 	} else if p.UnclaimedIntentCount > 0 {
-		// Explore - 循环派发直到填满 worker 槽位
+		// Explore - 检查项目是否已有其他方向的任务在运行
+		d.mu.Lock()
+		isReasoning := d.reasoning[p.ID]
+		d.mu.Unlock()
+		if isReasoning {
+			return // 项目已在 reason 中，等待
+		}
+
+		// 循环派发直到填满配额
 		for {
 			if !d.canDispatch() {
 				return
@@ -222,14 +283,22 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 			d.mu.Lock()
 			pc := d.projectWorkers[p.ID]
 			d.mu.Unlock()
-			if pc >= d.cfg.Runtime.MaxProjectWorkers {
+			if pc >= maxAllowed {
 				return
 			}
 			d.dispatchTask(ctx, p.ID, worker.TaskExplore)
-			// 每次派发后重新检查是否还有未认领 intent（dispatchTask 内部会检查，找不到时会直接返回）
-			break // dispatchTask 内部已有辣外检查，每轮由 schedulingRound 外层多次调用
+			// 每次派发后重新检查是否还有未认领 intent
+			break
 		}
 	} else if p.Reason == nil {
+		// Reason - 检查项目是否已有 Explore 在运行
+		d.mu.Lock()
+		hasExploring := d.projectExploring[p.ID]
+		d.mu.Unlock()
+		if hasExploring {
+			return // 项目已在 explore 中，等待
+		}
+
 		// Reason - 只有图有实质变化才触发
 		trigger := d.reasonTrigger(p)
 		if trigger == "" {
@@ -313,6 +382,7 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 	// 选择 worker
 	w := d.selectWorker(taskType)
 	if w == nil {
+		log.Printf("[dispatcher] dispatchTask: no worker available for task type %s", taskType)
 		return
 	}
 
@@ -374,6 +444,7 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 		}
 		d.mu.Lock()
 		d.exploringIntents[intentID] = true
+		d.projectExploring[projectID] = true
 		d.mu.Unlock()
 		// 替换 prompt 中的占位符
 		for _, intent := range detail.Intents {
@@ -427,6 +498,8 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 			d.projectWorkers[projectID]--
 			d.workerRunning[wName]--
 			delete(d.runningTasks_, taskKey)
+			// 唤醒等待中的调度线程
+			d.dispatchCond.Signal()
 			d.mu.Unlock()
 		}()
 
@@ -458,6 +531,7 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 			if task.IntentID != "" {
 				d.mu.Lock()
 				delete(d.exploringIntents, task.IntentID)
+				delete(d.projectExploring, projectID)
 				d.mu.Unlock()
 			}
 			if taskType == worker.TaskReason {

@@ -5,6 +5,6 @@ ctfd.py
 data
 data/*
 *.exe
-download_challenge.py
+download_challenges.py
 import_challenges.py
 solved_challenges.md

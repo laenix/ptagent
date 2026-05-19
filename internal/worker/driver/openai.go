@@ -16,7 +16,7 @@ import (
 	"github.com/ptagent/ptagent/internal/worker"
 )
 
-const maxToolRounds = 30 // 最多工具调用轮次
+const maxToolRounds = 50 // 最多工具调用轮次
 
 // ToolExecutorFunc 工具执行函数签名（支持本地和容器两种模式）
 type ToolExecutorFunc func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult
@@ -71,7 +71,7 @@ func (d *OpenAIDriver) chatURL() string {
 	if len(base) > 0 && base[len(base)-1] == '/' {
 		base = base[:len(base)-1]
 	}
-	if strings.HasSuffix(base, "/v1") {
+	if strings.HasSuffix(base, "/v1") || strings.HasSuffix(base, "/v3") {
 		return base + "/chat/completions"
 	}
 	return base + "/v1/chat/completions"
@@ -137,7 +137,7 @@ type chatResponse struct {
 func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.TaskResult, error) {
 	// 构建初始消息
 	messages := []chatMessage{
-		{Role: "system", Content: "You are an autonomous penetration testing agent. You have access to tools to interact with target systems. Use tools to gather information and exploit vulnerabilities. When you have completed your analysis or achieved the goal, return your final answer as a JSON object."},
+		{Role: "system", Content: "You are an autonomous penetration testing agent. You have access to tools to interact with target systems. Use tools to gather information and exploit vulnerabilities. IMPORTANT: After using tools for exploration, you MUST return a JSON result with your findings. If you found a flag, include it in the result. If you cannot solve it, return what you found with description=\"partial findings\" field. NEVER call tools indefinitely - you have limited rounds. Return JSON: {\"description\": \"your findings\"}"},
 		{Role: "user", Content: task.Prompt},
 	}
 
@@ -213,6 +213,29 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 			return nil, fmt.Errorf("parse task result: %w (content: %s)", err, truncateStr(content, 500))
 		}
 		return &result, nil
+	}
+
+	// 达到最大轮次后，强制让 AI 返回当前发现
+	log.Printf("[%s] forcing conclusion after %d rounds", d.name, maxToolRounds)
+	messages = append(messages, chatMessage{
+		Role:    "user",
+		Content: "You have reached the maximum number of tool call rounds. You MUST now return a JSON result with your current findings, even if incomplete. Return format: {\"accepted\": true, \"data\": {\"description\": \"what you found so far\"}}",
+	})
+
+	resp, err := d.chat(ctx, messages, false) // 强制不使用工具，直接返回结论
+	if err != nil {
+		return nil, fmt.Errorf("conclusion failed: %w", err)
+	}
+
+	if len(resp.Choices) > 0 {
+		content := resp.Choices[0].Message.Content
+		content = stripThinkBlock(content)
+		content = extractJSONFromMarkdown(content)
+
+		var result worker.TaskResult
+		if err := json.Unmarshal([]byte(content), &result); err == nil {
+			return &result, nil
+		}
 	}
 
 	return nil, fmt.Errorf("exceeded max tool call rounds (%d)", maxToolRounds)

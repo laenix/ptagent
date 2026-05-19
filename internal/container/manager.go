@@ -307,6 +307,7 @@ func (m *Manager) createContainer(ctx context.Context, projectID, name string) (
 	containerCfg := &container.Config{
 		Image: m.cfg.Image,
 		Env:   env,
+		Cmd:   []string{"sleep", "infinity"},
 	}
 
 	hostCfg := &container.HostConfig{
