@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { agentChat, AgentChatResponse, AgentAction } from '../services/api'
+import { agentChat, AgentChatResponse, AgentAction, getAgentConfig, updateAgentConfig } from '../services/api'
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -13,8 +13,38 @@ export default function AgentChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showConfig, setShowConfig] = useState(false)
+  const [configLoading, setConfigLoading] = useState(false)
+  const [configForm, setConfigForm] = useState({ llm_base_url: '', llm_api_key: '', llm_model: '' })
+  const [configStatus, setConfigStatus] = useState<'unconfigured' | 'configured' | 'error'>('unconfigured')
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const cfg = await getAgentConfig()
+      setConfigStatus(cfg.configured ? 'configured' : 'unconfigured')
+    } catch {
+      setConfigStatus('error')
+    }
+  }, [])
+
+  useEffect(() => {
+    loadConfig()
+  }, [loadConfig])
+
+  const saveConfig = useCallback(async () => {
+    setConfigLoading(true)
+    try {
+      await updateAgentConfig(configForm)
+      setConfigStatus('configured')
+      setShowConfig(false)
+    } catch {
+      setConfigStatus('error')
+    } finally {
+      setConfigLoading(false)
+    }
+  }, [configForm])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -80,18 +110,74 @@ export default function AgentChat() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 bg-gray-800 border-b border-gray-700">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+          <div className={`w-2 h-2 rounded-full animate-pulse ${configStatus === 'configured' ? 'bg-green-400' : configStatus === 'error' ? 'bg-red-400' : 'bg-yellow-400'}`} />
           <span className="text-sm font-semibold text-gray-100">Platform Agent</span>
         </div>
-        <button
-          onClick={() => setOpen(false)}
-          className="text-gray-400 hover:text-gray-200 transition-colors"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowConfig((v: boolean) => !v)}
+            className="text-gray-400 hover:text-gray-200 transition-colors p-1"
+            title="LLM Settings"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setOpen(false)}
+            className="text-gray-400 hover:text-gray-200 transition-colors p-1"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
+
+      {/* Config Panel */}
+      {showConfig && (
+        <div className="p-4 border-b border-gray-700 bg-gray-850 space-y-3">
+          <p className="text-xs text-gray-400">Configure the LLM backend for Platform Agent.</p>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Base URL</label>
+            <input
+              type="text"
+              value={configForm.llm_base_url}
+              onChange={e => setConfigForm((f: typeof configForm) => ({ ...f, llm_base_url: e.target.value }))}
+              placeholder="https://api.openai.com/v1"
+              className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">API Key</label>
+            <input
+              type="password"
+              value={configForm.llm_api_key}
+              onChange={e => setConfigForm((f: typeof configForm) => ({ ...f, llm_api_key: e.target.value }))}
+              placeholder="sk-..."
+              className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Model</label>
+            <input
+              type="text"
+              value={configForm.llm_model}
+              onChange={e => setConfigForm((f: typeof configForm) => ({ ...f, llm_model: e.target.value }))}
+              placeholder="gpt-4o"
+              className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <button
+            onClick={saveConfig}
+            disabled={configLoading}
+            className="w-full px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            {configLoading ? 'Saving...' : 'Save Configuration'}
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
