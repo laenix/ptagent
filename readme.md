@@ -45,6 +45,10 @@ docker compose up -d
 
 ![bugku](doc/bugku.png)
 
+### 6. ctf比赛测试
+
+![0xV01D](doc/0xV01D-team.jpg)
+
 ## 服务架构
 
 - **server**：Web 服务端，提供前端界面和 API
