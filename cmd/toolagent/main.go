@@ -195,7 +195,6 @@ func (a *ToolAgent) pythonExec(ctx context.Context, args map[string]interface{})
 	}
 
 	cmd := exec.CommandContext(ctx, "python3", "-c", code)
-	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -214,7 +213,6 @@ func (a *ToolAgent) shellExec(ctx context.Context, args map[string]interface{}) 
 	}
 
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
