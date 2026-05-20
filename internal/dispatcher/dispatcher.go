@@ -51,6 +51,7 @@ type Dispatcher struct {
 	workerRunning        map[string]int              // worker name -> running count
 	admitted             map[string]bool             // admitted project IDs
 	bootstrapping        map[string]bool             // projects currently in bootstrap
+	bootstrapped         map[string]bool             // projects that have successfully bootstrapped
 	reasoning            map[string]bool             // projects currently in reason
 	exploringIntents     map[string]bool             // intent IDs currently being explored
 	projectExploring    map[string]bool             // project IDs currently in explore (for direction lock)
@@ -77,6 +78,7 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 		workerRunning:        make(map[string]int),
 		admitted:             make(map[string]bool),
 		bootstrapping:        make(map[string]bool),
+		bootstrapped:         make(map[string]bool),
 		reasoning:            make(map[string]bool),
 		exploringIntents:     make(map[string]bool),
 		projectExploring:     make(map[string]bool),
@@ -317,6 +319,13 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 }
 
 func (d *Dispatcher) isInitialState(p *models.ProjectSummary) bool {
+	// 已成功 bootstrap 的项目不再是初始态
+	d.mu.Lock()
+	_, alreadyBootstrapped := d.bootstrapped[p.ID]
+	d.mu.Unlock()
+	if alreadyBootstrapped {
+		return false
+	}
 	// 初始态：只有 origin 和 goal 两个 fact，且没有非 bootstrap 的 intent
 	// IntentCount 包含 bootstrap intent，所以允许最多 1 个 intent（bootstrap intent 本身）
 	return p.FactCount <= 2 && p.IntentCount <= 1
@@ -612,6 +621,14 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 			d.mu.Unlock()
 		}
 		d.writeBack(ctx, projectID, task, result, wName)
+
+		// Bootstrap 成功时清理标记并标记为已 bootstrap
+		if taskType == worker.TaskBootstrap {
+			d.mu.Lock()
+			delete(d.bootstrapping, projectID)
+			d.bootstrapped[projectID] = true
+			d.mu.Unlock()
+		}
 	}()
 }
 
@@ -619,6 +636,12 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 func (d *Dispatcher) releaseOnFailure(ctx context.Context, projectID string, task *worker.Task, workerName string) {
 	if task.IntentID != "" {
 		d.releaseIntent(ctx, projectID, task.IntentID, workerName)
+	}
+	// Bootstrap 失败时清理标记，允许重试
+	if task.Type == worker.TaskBootstrap {
+		d.mu.Lock()
+		delete(d.bootstrapping, projectID)
+		d.mu.Unlock()
 	}
 }
 
