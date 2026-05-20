@@ -364,6 +364,60 @@ function ReplayTab() {
   )
 }
 
+function LiveTab() {
+  const liveEvents = useAppStore(s => s.liveEvents)
+  const sseConnected = useAppStore(s => s.sseConnected)
+  const project = useAppStore(s => s.project)
+
+  const projectEvents = project
+    ? liveEvents.filter(e => e.project_id === project.project.id || !e.project_id)
+    : liveEvents
+
+  const eventColor = (type: string) => {
+    if (type.includes('completed') || type.includes('concluded')) return { dot: 'bg-emerald-400', text: 'text-emerald-700', bg: 'bg-emerald-50' }
+    if (type.includes('failed')) return { dot: 'bg-red-400', text: 'text-red-700', bg: 'bg-red-50' }
+    if (type.includes('dispatched')) return { dot: 'bg-blue-400', text: 'text-blue-700', bg: 'bg-blue-50' }
+    if (type.includes('created')) return { dot: 'bg-violet-400', text: 'text-violet-700', bg: 'bg-violet-50' }
+    return { dot: 'bg-slate-300', text: 'text-slate-600', bg: 'bg-slate-50' }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[11px] text-slate-400 mb-3">
+        <span className={`inline-block w-2 h-2 rounded-full ${sseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+        <span>{sseConnected ? 'Connected' : 'Disconnected'}</span>
+        <span className="ml-auto">{projectEvents.length} events</span>
+      </div>
+
+      {projectEvents.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-5 py-10 text-center shadow-sm">
+          <p className="text-sm text-slate-300">Waiting for events...</p>
+          <p className="text-xs text-slate-300 mt-1">Events will appear here in real-time</p>
+        </div>
+      ) : (
+        [...projectEvents].reverse().map((ev, idx) => {
+          const colors = eventColor(ev.type)
+          return (
+            <div key={idx} className="flex items-start gap-2">
+              <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${colors.dot}`} />
+              <div className="min-w-0 flex-1">
+                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${colors.bg} ${colors.text}`}>
+                  {ev.type.replace(/_/g, ' ')}
+                </span>
+                {ev.data && typeof ev.data === 'object' && (
+                  <p className="text-[11px] text-slate-500 mt-0.5 break-words truncate">
+                    {JSON.stringify(ev.data).slice(0, 120)}
+                  </p>
+                )}
+              </div>
+            </div>
+          )
+        })
+      )}
+    </div>
+  )
+}
+
 export default function SidePanel() {
   const sideTab = useAppStore(s => s.sideTab)
   const setSideTab = useAppStore(s => s.setSideTab)
@@ -376,7 +430,7 @@ export default function SidePanel() {
     >
       {/* Tabs */}
       <div className="flex border-b border-slate-100 shrink-0">
-        {(['detail', 'hints', 'log', 'replay'] as const).map(tab => (
+        {(['detail', 'hints', 'log', 'replay', 'live'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setSideTab(tab)}
@@ -386,7 +440,10 @@ export default function SidePanel() {
                 : 'text-slate-400 hover:text-slate-600'
             }`}
           >
-            {tab}
+            {tab === 'live' ? <span className="flex items-center gap-1">
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${useAppStore.getState().sseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-300'}`} />
+              Live
+            </span> : tab}
           </button>
         ))}
       </div>
@@ -397,6 +454,7 @@ export default function SidePanel() {
         {sideTab === 'hints' && <HintsTab />}
         {sideTab === 'log' && <LogTab />}
         {sideTab === 'replay' && <ReplayTab />}
+        {sideTab === 'live' && <LiveTab />}
       </div>
     </div>
   )

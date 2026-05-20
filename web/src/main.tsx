@@ -11,6 +11,8 @@ import ProjectDetail from './pages/ProjectDetail'
 import Modals from './components/Modals'
 import DispatcherModal from './components/DispatcherModal'
 import Toast from './components/Toast'
+import CTFdPanel from './components/CTFdPanel'
+import AgentChat from './components/AgentChat'
 import './index.css'
 
 // Register Cytoscape layout extensions
@@ -30,6 +32,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <Modals />
       <DispatcherModal />
       <Toast />
+      <CTFdPanel />
+      <AgentChat />
     </BrowserRouter>
   </React.StrictMode>,
 )

@@ -5,6 +5,9 @@ ctfd.py
 data
 data/*
 *.exe
+ptagent-dispatcher
 download_challenges.py
 import_challenges.py
 solved_challenges.md
+**/dist
+**/node_modules

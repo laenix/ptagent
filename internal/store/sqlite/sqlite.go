@@ -27,6 +27,10 @@ func New(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
+	// SQLite concurrency: limit connections to avoid "database is locked"
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+
 	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -125,6 +129,23 @@ func (s *SQLiteStore) migrate() error {
 		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 	);
 	CREATE INDEX IF NOT EXISTS idx_task_events_project ON task_events(project_id, created_at);
+
+	CREATE TABLE IF NOT EXISTS ctfd_instances (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		url TEXT NOT NULL,
+		token TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS ctfd_project_links (
+		project_id TEXT PRIMARY KEY,
+		ctfd_instance_id TEXT NOT NULL,
+		ctfd_challenge_id INTEGER NOT NULL,
+		auto_submit INTEGER NOT NULL DEFAULT 1,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+		FOREIGN KEY (ctfd_instance_id) REFERENCES ctfd_instances(id) ON DELETE CASCADE
+	);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -444,14 +465,27 @@ func (s *SQLiteStore) ReleaseIntent(ctx context.Context, projectID, intentID str
 }
 
 func (s *SQLiteStore) ConcludeIntent(ctx context.Context, projectID, intentID string, req *models.ConcludeRequest) (*models.ConcludeResponse, error) {
-	// 在事务外获取序列号，避免 SQLite 写锁死锁
-	factID := fmt.Sprintf("f%03d", s.nextFactSeq(ctx, projectID))
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// 在事务内获取序列号，确保并发安全（不会产生重复 ID）
+	_, err = tx.ExecContext(ctx,
+		"INSERT OR IGNORE INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0)",
+		projectID, "fact")
+	if err != nil {
+		return nil, fmt.Errorf("init fact counter: %w", err)
+	}
+	var seq int
+	err = tx.QueryRowContext(ctx,
+		"UPDATE scoped_counters SET value = value + 1 WHERE project_id = ? AND kind = ? RETURNING value",
+		projectID, "fact").Scan(&seq)
+	if err != nil {
+		return nil, fmt.Errorf("increment fact counter: %w", err)
+	}
+	factID := fmt.Sprintf("f%03d", seq)
 
 	// 创建新 Fact
 	_, err = tx.ExecContext(ctx,
@@ -482,14 +516,27 @@ func (s *SQLiteStore) ConcludeIntent(ctx context.Context, projectID, intentID st
 }
 
 func (s *SQLiteStore) CompleteProject(ctx context.Context, projectID string, req *models.CompleteRequest) (*models.Project, error) {
-	// 在事务外获取序列号，避免 SQLite 写锁死锁
-	intentID := fmt.Sprintf("i%03d", s.nextIntentSeq(ctx, projectID))
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// 在事务内获取序列号，确保并发安全
+	_, err = tx.ExecContext(ctx,
+		"INSERT OR IGNORE INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0)",
+		projectID, "intent")
+	if err != nil {
+		return nil, fmt.Errorf("init intent counter: %w", err)
+	}
+	var seq int
+	err = tx.QueryRowContext(ctx,
+		"UPDATE scoped_counters SET value = value + 1 WHERE project_id = ? AND kind = ? RETURNING value",
+		projectID, "intent").Scan(&seq)
+	if err != nil {
+		return nil, fmt.Errorf("increment intent counter: %w", err)
+	}
+	intentID := fmt.Sprintf("i%03d", seq)
 
 	// 创建 complete intent (from → goal)
 	now := time.Now().UTC()
@@ -526,15 +573,42 @@ func (s *SQLiteStore) ReopenProject(ctx context.Context, projectID string, req *
 		return nil, fmt.Errorf("no completion edge found: %w", err)
 	}
 
-	// 在事务外获取序列号，避免 SQLite 写锁死锁
-	factID := fmt.Sprintf("f%03d", s.nextFactSeq(ctx, projectID))
-	intentID := fmt.Sprintf("i%03d", s.nextIntentSeq(ctx, projectID))
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// 在事务内获取序列号，确保并发安全
+	_, err = tx.ExecContext(ctx,
+		"INSERT OR IGNORE INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0)",
+		projectID, "fact")
+	if err != nil {
+		return nil, fmt.Errorf("init fact counter: %w", err)
+	}
+	var factSeq int
+	err = tx.QueryRowContext(ctx,
+		"UPDATE scoped_counters SET value = value + 1 WHERE project_id = ? AND kind = ? RETURNING value",
+		projectID, "fact").Scan(&factSeq)
+	if err != nil {
+		return nil, fmt.Errorf("increment fact counter: %w", err)
+	}
+	factID := fmt.Sprintf("f%03d", factSeq)
+
+	_, err = tx.ExecContext(ctx,
+		"INSERT OR IGNORE INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0)",
+		projectID, "intent")
+	if err != nil {
+		return nil, fmt.Errorf("init intent counter: %w", err)
+	}
+	var intentSeq int
+	err = tx.QueryRowContext(ctx,
+		"UPDATE scoped_counters SET value = value + 1 WHERE project_id = ? AND kind = ? RETURNING value",
+		projectID, "intent").Scan(&intentSeq)
+	if err != nil {
+		return nil, fmt.Errorf("increment intent counter: %w", err)
+	}
+	intentID := fmt.Sprintf("i%03d", intentSeq)
 
 	// 删除完成边
 	_, err = tx.ExecContext(ctx, "DELETE FROM intents WHERE project_id = ? AND id = ?", projectID, completeIntentID)
@@ -763,6 +837,30 @@ func (s *SQLiteStore) CleanupExpiredClaims(ctx context.Context, intentTimeout, r
 	return err
 }
 
+func (s *SQLiteStore) CountFactTags(ctx context.Context) (map[string]models.FactTagCounts, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project_id,
+			SUM(CASE WHEN description LIKE '[SUCCESS]%' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN description LIKE '[FAILURE]%' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN description LIKE '[BLOCKER]%' THEN 1 ELSE 0 END)
+		FROM facts GROUP BY project_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]models.FactTagCounts)
+	for rows.Next() {
+		var pid string
+		var tc models.FactTagCounts
+		if err := rows.Scan(&pid, &tc.SuccessCount, &tc.FailureCount, &tc.BlockerCount); err != nil {
+			return nil, err
+		}
+		result[pid] = tc
+	}
+	return result, rows.Err()
+}
+
 // --- Task Events ---
 
 func (s *SQLiteStore) RecordTaskEvent(ctx context.Context, event *models.TaskEvent) error {
@@ -928,4 +1026,89 @@ func (s *SQLiteStore) nextProjectSeq(ctx context.Context) int {
 
 func generateShortID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%1000000)
+}
+
+// --- CTFd Instances ---
+
+func (s *SQLiteStore) ListCTFdInstances(ctx context.Context) ([]models.CTFdInstance, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name, url, created_at FROM ctfd_instances ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var instances []models.CTFdInstance
+	for rows.Next() {
+		var inst models.CTFdInstance
+		if err := rows.Scan(&inst.ID, &inst.Name, &inst.URL, &inst.CreatedAt); err != nil {
+			return nil, err
+		}
+		instances = append(instances, inst)
+	}
+	return instances, rows.Err()
+}
+
+func (s *SQLiteStore) GetCTFdInstance(ctx context.Context, id string) (*models.CTFdInstance, error) {
+	var inst models.CTFdInstance
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, name, url, token, created_at FROM ctfd_instances WHERE id = ?", id).
+		Scan(&inst.ID, &inst.Name, &inst.URL, &inst.Token, &inst.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
+}
+
+func (s *SQLiteStore) AddCTFdInstance(ctx context.Context, req *models.AddCTFdInstanceRequest) (*models.CTFdInstance, error) {
+	id := generateShortID()
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		"INSERT INTO ctfd_instances (id, name, url, token, created_at) VALUES (?, ?, ?, ?, ?)",
+		id, req.Name, strings.TrimRight(req.URL, "/"), req.Token, now)
+	if err != nil {
+		return nil, err
+	}
+	return &models.CTFdInstance{ID: id, Name: req.Name, URL: req.URL, CreatedAt: now}, nil
+}
+
+func (s *SQLiteStore) DeleteCTFdInstance(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM ctfd_instances WHERE id = ?", id)
+	return err
+}
+
+// --- CTFd Project Links ---
+
+func (s *SQLiteStore) LinkProjectCTFd(ctx context.Context, link *models.CTFdProjectLink) error {
+	autoSubmit := 0
+	if link.AutoSubmit {
+		autoSubmit = 1
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO ctfd_project_links (project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit)
+		 VALUES (?, ?, ?, ?)`,
+		link.ProjectID, link.CTFdInstanceID, link.CTFdChallengeID, autoSubmit)
+	return err
+}
+
+func (s *SQLiteStore) GetProjectCTFdLink(ctx context.Context, projectID string) (*models.CTFdProjectLink, error) {
+	var link models.CTFdProjectLink
+	var autoSubmit int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit FROM ctfd_project_links WHERE project_id = ?",
+		projectID).Scan(&link.ProjectID, &link.CTFdInstanceID, &link.CTFdChallengeID, &autoSubmit)
+	if err != nil {
+		return nil, err
+	}
+	link.AutoSubmit = autoSubmit == 1
+	return &link, nil
+}
+
+func (s *SQLiteStore) SetProjectAutoSubmit(ctx context.Context, projectID string, autoSubmit bool) error {
+	v := 0
+	if autoSubmit {
+		v = 1
+	}
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE ctfd_project_links SET auto_submit = ? WHERE project_id = ?", v, projectID)
+	return err
 }

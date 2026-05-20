@@ -29,10 +29,11 @@ type reasonCheckpoint struct {
 
 // runningTask 正在执行的任务信息，用于取消非活跃项目的任务
 type runningTask struct {
-	projectID string
-	taskType  worker.TaskType
-	worker    string
-	cancel    context.CancelFunc
+	projectID  string
+	taskType   worker.TaskType
+	worker     string
+	cancel     context.CancelFunc
+	generation uint64 // 唯一标识，防止 cancelInactiveTasks 后旧 goroutine defer 误删新任务
 }
 
 // Dispatcher 核心调度器
@@ -41,24 +42,29 @@ type Dispatcher struct {
 	client       *http.Client
 	drivers      map[string]worker.Driver
 	prompts      *PromptManager
-	containerMgr *container.Manager // 容器管理器（可选，nil 时本地执行）
+	containerMgr *container.Manager                                              // 容器管理器（可选，nil 时本地执行）
+	autoSubmitFn func(ctx context.Context, projectID, description string) string // 自动提交回调
 
 	// 运行状态
-	mu                   sync.Mutex
-	dispatchCond         *sync.Cond               // 任务完成时唤醒调度线程
-	runningTasks         int
-	projectWorkers       map[string]int              // projectID -> running count
-	workerRunning        map[string]int              // worker name -> running count
-	admitted             map[string]bool             // admitted project IDs
-	bootstrapping        map[string]bool             // projects currently in bootstrap
-	bootstrapped         map[string]bool             // projects that have successfully bootstrapped
-	reasoning            map[string]bool             // projects currently in reason
-	exploringIntents     map[string]bool             // intent IDs currently being explored
-	projectExploring    map[string]bool             // project IDs currently in explore (for direction lock)
-	reasonCheckpoints    map[string]reasonCheckpoint // projectID -> last reason graph snapshot
-	runningTasks_        map[string]*runningTask     // taskKey -> running task (for cancellation)
-	workerUnhealthyUntil map[string]time.Time        // worker name -> unhealthy until
-	workerRejectedUntil  map[rejectionKey]time.Time  // (project,task,worker) -> rejected until
+	mu                    sync.Mutex
+	runningTasks          int
+	projectWorkers        map[string]int              // projectID -> running count
+	workerRunning         map[string]int              // worker name -> running count
+	admitted              map[string]bool             // admitted project IDs
+	bootstrapping         map[string]bool             // projects currently in bootstrap
+	bootstrapped          map[string]bool             // projects that have successfully bootstrapped
+	reasoning             map[string]bool             // projects currently in reason
+	exploringIntents      map[string]bool             // intent IDs currently being explored
+	projectExploring      map[string]bool             // project IDs currently in explore (for direction lock)
+	reasonCheckpoints     map[string]reasonCheckpoint // projectID -> last reason graph snapshot
+	runningTasks_         map[string]*runningTask     // taskKey -> running task (for cancellation)
+	workerUnhealthyUntil  map[string]time.Time        // worker name -> unhealthy until
+	workerUnhealthyCount  map[string]int              // worker name -> consecutive unhealthy count
+	workerLastHealthcheck map[string]time.Time        // worker name -> last healthcheck time
+	workerRejectedUntil   map[rejectionKey]time.Time  // (project,task,worker) -> rejected until
+	bootstrapRetries      map[string]int              // projectID -> bootstrap failure count
+	bootstrapBackoff      map[string]time.Time        // projectID -> next retry allowed at
+	taskGeneration        uint64                      // 递增的任务代号
 }
 
 // rejectionKey worker 拒绝的键
@@ -71,23 +77,26 @@ type rejectionKey struct {
 // New 创建 Dispatcher
 func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 	d := &Dispatcher{
-		cfg:                  cfg,
-		client:               &http.Client{Timeout: 30 * time.Second},
-		drivers:              make(map[string]worker.Driver),
-		projectWorkers:       make(map[string]int),
-		workerRunning:        make(map[string]int),
-		admitted:             make(map[string]bool),
-		bootstrapping:        make(map[string]bool),
-		bootstrapped:         make(map[string]bool),
-		reasoning:            make(map[string]bool),
-		exploringIntents:     make(map[string]bool),
-		projectExploring:     make(map[string]bool),
-		reasonCheckpoints:    make(map[string]reasonCheckpoint),
-		runningTasks_:        make(map[string]*runningTask),
-		workerUnhealthyUntil: make(map[string]time.Time),
-		workerRejectedUntil:  make(map[rejectionKey]time.Time),
+		cfg:                   cfg,
+		client:                &http.Client{Timeout: 30 * time.Second},
+		drivers:               make(map[string]worker.Driver),
+		projectWorkers:        make(map[string]int),
+		workerRunning:         make(map[string]int),
+		admitted:              make(map[string]bool),
+		bootstrapping:         make(map[string]bool),
+		bootstrapped:          make(map[string]bool),
+		reasoning:             make(map[string]bool),
+		exploringIntents:      make(map[string]bool),
+		projectExploring:      make(map[string]bool),
+		reasonCheckpoints:     make(map[string]reasonCheckpoint),
+		runningTasks_:         make(map[string]*runningTask),
+		workerUnhealthyUntil:  make(map[string]time.Time),
+		workerUnhealthyCount:  make(map[string]int),
+		workerLastHealthcheck: make(map[string]time.Time),
+		workerRejectedUntil:   make(map[rejectionKey]time.Time),
+		bootstrapRetries:      make(map[string]int),
+		bootstrapBackoff:      make(map[string]time.Time),
 	}
-	d.dispatchCond = sync.NewCond(&d.mu)
 
 	// 初始化容器管理器（如果启用）
 	if cfg.Container.Enabled {
@@ -109,6 +118,8 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 		switch w.Type {
 		case "openai":
 			drv = driver.NewOpenAIDriver(w.Name, w.Env, &cfg.Proxy)
+		case "anthropic":
+			drv = driver.NewAnthropicDriver(w.Name, w.Env, &cfg.Proxy)
 		case "mock":
 			drv = driver.NewMockDriver(w.Name, w.Env)
 		default:
@@ -118,6 +129,11 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 	}
 
 	return d, nil
+}
+
+// SetAutoSubmitFunc 设置自动提交 flag 的回调函数
+func (d *Dispatcher) SetAutoSubmitFunc(fn func(ctx context.Context, projectID, description string) string) {
+	d.autoSubmitFn = fn
 }
 
 // Run 启动调度主循环
@@ -156,12 +172,14 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 			activeIDs[p.ID] = true
 		}
 	}
+	d.mu.Lock()
 	for id := range d.admitted {
 		if !activeIDs[id] {
 			delete(d.admitted, id)
 			log.Printf("[dispatcher] removed non-active project %s from admitted set", id)
 		}
 	}
+	d.mu.Unlock()
 	d.cancelInactiveTasks(statusByID)
 
 	// 计算项目配额：每个项目应该获得的 worker 上限
@@ -175,15 +193,16 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 		quota = 1
 	}
 
-	dispatched := false
-
 	// 1. 遍历已 admitted 的 active 项目（公平调度）
 	for _, p := range projects {
 		if p.Status != models.ProjectStatusActive {
 			continue
 		}
 
-		if !d.admitted[p.ID] {
+		d.mu.Lock()
+		admitted := d.admitted[p.ID]
+		d.mu.Unlock()
+		if !admitted {
 			continue
 		}
 
@@ -195,19 +214,20 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 		// 检查项目是否已达配额
 		d.mu.Lock()
 		projectCount := d.projectWorkers[p.ID]
-		d.mu.Unlock()
 		if projectCount >= quota {
+			d.mu.Unlock()
 			log.Printf("[dispatcher] project %s已达配额(%d>=%d), 跳过", p.ID, projectCount, quota)
 			continue
 		}
+		d.mu.Unlock()
 
 		log.Printf("[dispatcher] 准备为项目 %s 调度, projectCount=%d quota=%d", p.ID, projectCount, quota)
 		d.dispatchForProject(ctx, &p, quota)
-		dispatched = true
 	}
 
 	// 2. admit 新项目
-	if d.admittedCount() < d.cfg.Runtime.MaxRunningProjects {
+	d.mu.Lock()
+	if d.admittedCountLocked() < d.cfg.Runtime.MaxRunningProjects {
 		for _, p := range projects {
 			if p.Status != models.ProjectStatusActive {
 				continue
@@ -220,19 +240,7 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 			break
 		}
 	}
-
-	// 3. 如果没有派发任务，等待一段时间让任务完成
-	if !dispatched {
-		d.mu.Lock()
-		if d.runningTasks < d.cfg.Runtime.MaxWorkers {
-			waitInterval := time.Duration(d.cfg.Runtime.Interval) * time.Second
-			log.Printf("[dispatcher] no tasks dispatched, sleeping %v before next round", waitInterval)
-			d.mu.Unlock()
-			time.Sleep(waitInterval)
-		} else {
-			d.mu.Unlock()
-		}
-	}
+	d.mu.Unlock()
 }
 
 // dispatchForProject 为单个项目调度任务（可能派发多个 explore）
@@ -258,9 +266,15 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 	log.Printf("[dispatcher] dispatchForProject: checking project %s, isInitialState=%v, UnclaimedIntentCount=%d, Reason=%v",
 		p.ID, d.isInitialState(p), p.UnclaimedIntentCount, p.Reason)
 	if d.isInitialState(p) {
-		// Bootstrap - 只派遣一次
+		// Bootstrap - 只派遣一次，带退避重试
 		d.mu.Lock()
 		already := d.bootstrapping[p.ID]
+		backoffUntil := d.bootstrapBackoff[p.ID]
+		if !already && time.Now().Before(backoffUntil) {
+			d.mu.Unlock()
+			log.Printf("[dispatcher] bootstrap backoff for project %s until %s", p.ID, backoffUntil.Format(time.RFC3339))
+			return
+		}
 		if !already {
 			d.bootstrapping[p.ID] = true
 		}
@@ -277,21 +291,17 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 			return // 项目已在 reason 中，等待
 		}
 
-		// 循环派发直到填满配额
-		for {
-			if !d.canDispatch() {
-				return
-			}
-			d.mu.Lock()
-			pc := d.projectWorkers[p.ID]
-			d.mu.Unlock()
-			if pc >= maxAllowed {
-				return
-			}
-			d.dispatchTask(ctx, p.ID, worker.TaskExplore)
-			// 每次派发后重新检查是否还有未认领 intent
-			break
+		// 派发 explore 任务
+		if !d.canDispatch() {
+			return
 		}
+		d.mu.Lock()
+		pc := d.projectWorkers[p.ID]
+		d.mu.Unlock()
+		if pc >= maxAllowed {
+			return
+		}
+		d.dispatchTask(ctx, p.ID, worker.TaskExplore)
 	} else if p.Reason == nil {
 		// Reason - 检查项目是否已有 Explore 在运行
 		d.mu.Lock()
@@ -339,16 +349,14 @@ func (d *Dispatcher) reasonTrigger(p *models.ProjectSummary) string {
 
 	openIntentCount := p.WorkingIntentCount + p.UnclaimedIntentCount
 	if !exists {
-		// 初始化检查点（有 open intent 时）
-		if openIntentCount > 0 {
-			d.mu.Lock()
-			d.reasonCheckpoints[p.ID] = reasonCheckpoint{
-				factCount:       p.FactCount,
-				hintCount:       p.HintCount,
-				openIntentCount: openIntentCount,
-			}
-			d.mu.Unlock()
+		// 初始化检查点
+		d.mu.Lock()
+		d.reasonCheckpoints[p.ID] = reasonCheckpoint{
+			factCount:       p.FactCount,
+			hintCount:       p.HintCount,
+			openIntentCount: openIntentCount,
 		}
+		d.mu.Unlock()
 		return "initial"
 	}
 
@@ -372,7 +380,7 @@ func (d *Dispatcher) reasonTrigger(p *models.ProjectSummary) string {
 func (d *Dispatcher) cancelInactiveTasks(statusByID map[string]models.ProjectStatus) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for key, rt := range d.runningTasks_ {
+	for _, rt := range d.runningTasks_ {
 		status, exists := statusByID[rt.projectID]
 		if !exists {
 			status = "deleted"
@@ -381,7 +389,7 @@ func (d *Dispatcher) cancelInactiveTasks(statusByID map[string]models.ProjectSta
 			log.Printf("[dispatcher] cancelling task for inactive project project=%s task=%s worker=%s status=%s",
 				rt.projectID, rt.taskType, rt.worker, status)
 			rt.cancel()
-			delete(d.runningTasks_, key)
+			// 不从 runningTasks_ 中删除，让 goroutine 的 defer 自行清理计数器
 		}
 	}
 }
@@ -389,7 +397,7 @@ func (d *Dispatcher) cancelInactiveTasks(statusByID map[string]models.ProjectSta
 // dispatchTask 派发任务
 func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskType worker.TaskType, triggerArgs ...string) {
 	// 选择 worker
-	w := d.selectWorker(taskType)
+	w := d.selectWorker(projectID, taskType)
 	if w == nil {
 		log.Printf("[dispatcher] dispatchTask: no worker available for task type %s", taskType)
 		return
@@ -397,14 +405,23 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 
 	drv := d.drivers[w.Name]
 
-	// 健康检查
-	hcCtx, cancel := context.WithTimeout(ctx, time.Duration(d.cfg.Runtime.HealthcheckTimeout)*time.Second)
-	defer cancel()
-	if err := drv.Healthcheck(hcCtx); err != nil {
-		log.Printf("[dispatcher] worker %s healthcheck failed: %v", w.Name, err)
-		d.markWorkerUnhealthy(w.Name)
-		d.recordEvent(projectID, string(taskType), "", w.Name, "healthcheck_failed", "", "", err.Error(), 0)
-		return
+	// 健康检查（缓存 2s 内的结果避免重复检查）
+	d.mu.Lock()
+	lastHC := d.workerLastHealthcheck[w.Name]
+	d.mu.Unlock()
+	if time.Since(lastHC) > 2*time.Second {
+		hcCtx, cancel := context.WithTimeout(ctx, time.Duration(d.cfg.Runtime.HealthcheckTimeout)*time.Second)
+		defer cancel()
+		if err := drv.Healthcheck(hcCtx); err != nil {
+			log.Printf("[dispatcher] worker %s healthcheck failed: %v", w.Name, err)
+			d.markWorkerUnhealthy(w.Name)
+			d.recordEvent(projectID, string(taskType), "", w.Name, "healthcheck_failed", "", "", err.Error(), 0)
+			return
+		}
+		d.mu.Lock()
+		d.workerLastHealthcheck[w.Name] = time.Now()
+		delete(d.workerUnhealthyCount, w.Name) // 成功后重置退避计数
+		d.mu.Unlock()
 	}
 
 	// 获取项目详情构造 prompt
@@ -414,17 +431,29 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 		return
 	}
 
-	// 获取 YAML 导出用于 reason/explore
+	// 上下文窗口优化：根据任务类型过滤图数据
+	renderDetail := detail
 	var exportYAML string
+	switch taskType {
+	case worker.TaskReason:
+		// reason：剪枝后的图（折叠死胡同分支）
+		renderDetail = pruneDeadEnds(detail)
+		log.Printf("[dispatcher] reason: pruned graph facts=%d->%d intents=%d->%d",
+			len(detail.Facts), len(renderDetail.Facts), len(detail.Intents), len(renderDetail.Intents))
+	case worker.TaskExplore:
+		// explore：仅传祖先链路（大幅减少 token）
+		// 先选出要 explore 的 intent，再构建祖先链
+		// 延迟到认领 intent 后再过滤
+	}
+
 	if taskType == worker.TaskReason || taskType == worker.TaskExplore {
 		exportYAML, err = d.exportProjectYAML(ctx, projectID)
 		if err != nil {
 			log.Printf("[dispatcher] export YAML error: %v", err)
-			// fallback 到 prompt manager 内置的 graph 构建
 		}
 	}
 
-	prompt, err := d.prompts.RenderWithExport(taskType, detail, exportYAML)
+	prompt, err := d.prompts.RenderWithExport(taskType, renderDetail, exportYAML)
 	if err != nil {
 		log.Printf("[dispatcher] render prompt error: %v", err)
 		return
@@ -434,27 +463,60 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 	var intentID string
 	if taskType == worker.TaskExplore && detail != nil {
 		d.mu.Lock()
+		var bestIntent string
+		bestScore := -1
 		for _, intent := range detail.Intents {
 			if intent.IsOpen() && !intent.IsClaimed() && !d.exploringIntents[intent.ID] {
-				intentID = intent.ID
-				break
+				score := scoreIntent(intent.Description)
+				if score > bestScore {
+					bestScore = score
+					bestIntent = intent.ID
+				}
 			}
 		}
+		intentID = bestIntent
 		d.mu.Unlock()
 		if intentID == "" {
 			log.Printf("[dispatcher] no available intent for explore in project %s, skipping", projectID)
 			return
 		}
+		// 先标记本地占位，防止其他调度轮选中同一 intent
+		d.mu.Lock()
+		d.exploringIntents[intentID] = true
+		d.mu.Unlock()
 		// 通过 Server API 认领（原子操作）
 		claimStatus := d.heartbeatIntent(ctx, projectID, intentID, w.Name)
 		if claimStatus != http.StatusOK {
+			// 认领失败，清除本地占位
+			d.mu.Lock()
+			delete(d.exploringIntents, intentID)
+			d.mu.Unlock()
 			log.Printf("[dispatcher] intent claim failed project=%s intent=%s status=%d", projectID, intentID, claimStatus)
 			return
 		}
 		d.mu.Lock()
-		d.exploringIntents[intentID] = true
 		d.projectExploring[projectID] = true
 		d.mu.Unlock()
+
+		// 上下文窗口优化：explore 只传祖先链路
+		var targetIntent *models.Intent
+		for _, intent := range detail.Intents {
+			if intent.ID == intentID {
+				targetIntent = &intent
+				break
+			}
+		}
+		if targetIntent != nil {
+			ancestorDetail := extractAncestorChain(detail, targetIntent)
+			// 用祖先链重新渲染 prompt
+			ancestorPrompt, err := d.prompts.RenderWithExport(taskType, ancestorDetail, "")
+			if err == nil {
+				prompt = ancestorPrompt
+				log.Printf("[dispatcher] explore: ancestor chain facts=%d (full=%d) intents=%d (full=%d)",
+					len(ancestorDetail.Facts), len(detail.Facts), len(ancestorDetail.Intents), len(detail.Intents))
+			}
+		}
+
 		// 替换 prompt 中的占位符
 		for _, intent := range detail.Intents {
 			if intent.ID == intentID {
@@ -485,14 +547,17 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 	taskKey := fmt.Sprintf("%s:%s:%s", projectID, taskType, intentID)
 	taskCtx, taskCancel := context.WithCancel(ctx)
 	d.mu.Lock()
+	d.taskGeneration++
+	gen := d.taskGeneration
 	d.runningTasks++
 	d.projectWorkers[projectID]++
 	d.workerRunning[w.Name]++
 	d.runningTasks_[taskKey] = &runningTask{
-		projectID: projectID,
-		taskType:  taskType,
-		worker:    w.Name,
-		cancel:    taskCancel,
+		projectID:  projectID,
+		taskType:   taskType,
+		worker:     w.Name,
+		cancel:     taskCancel,
+		generation: gen,
 	}
 	d.mu.Unlock()
 
@@ -503,12 +568,13 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 		defer taskCancel()
 		defer func() {
 			d.mu.Lock()
+			// 仅当 generation 匹配时才清理，避免误删被重新分配的 taskKey
+			if cur, ok := d.runningTasks_[taskKey]; ok && cur.generation == gen {
+				delete(d.runningTasks_, taskKey)
+			}
 			d.runningTasks--
 			d.projectWorkers[projectID]--
 			d.workerRunning[wName]--
-			delete(d.runningTasks_, taskKey)
-			// 唤醒等待中的调度线程
-			d.dispatchCond.Signal()
 			d.mu.Unlock()
 		}()
 
@@ -544,8 +610,10 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 				d.mu.Unlock()
 			}
 			if taskType == worker.TaskReason {
+				// 无论成功失败都清除 checkpoint，下轮重新初始化准确快照
 				d.mu.Lock()
 				delete(d.reasoning, projectID)
+				delete(d.reasonCheckpoints, projectID)
 				d.mu.Unlock()
 				// 释放 reason lease（使用独立 ctx，避免主 ctx 已取消时无法释放）
 				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -567,12 +635,17 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 				d.releaseOnFailure(taskCtx, projectID, task, wName)
 				return
 			}
-			if oaiDrv, ok := drv.(*driver.OpenAIDriver); ok {
-				containerInfo := info
-				oaiDrv.SetContainerExecutor(func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
-					return d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
-				})
-				defer oaiDrv.SetContainerExecutor(nil)
+			containerInfo := info
+			containerExec := func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
+				return d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
+			}
+			switch typedDrv := drv.(type) {
+			case *driver.OpenAIDriver:
+				typedDrv.SetContainerExecutor(containerExec)
+				defer typedDrv.SetContainerExecutor(nil)
+			case *driver.AnthropicDriver:
+				typedDrv.SetContainerExecutor(containerExec)
+				defer typedDrv.SetContainerExecutor(nil)
 			}
 		}
 
@@ -614,18 +687,15 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 		outputBytes, _ := json.Marshal(result.Data)
 		d.recordEvent(projectID, string(taskType), intentID, wName, "succeed", task.Prompt, string(outputBytes), "", durationMs)
 
-		// 写回结果，reason 成功时删除 checkpoint（下一轮会重新初始化正确的快照）
-		if taskType == worker.TaskReason {
-			d.mu.Lock()
-			delete(d.reasonCheckpoints, projectID)
-			d.mu.Unlock()
-		}
+		// 写回结果（checkpoint 在 defer 中统一清理）
 		d.writeBack(ctx, projectID, task, result, wName)
 
 		// Bootstrap 成功时清理标记并标记为已 bootstrap
 		if taskType == worker.TaskBootstrap {
 			d.mu.Lock()
 			delete(d.bootstrapping, projectID)
+			delete(d.bootstrapRetries, projectID)
+			delete(d.bootstrapBackoff, projectID)
 			d.bootstrapped[projectID] = true
 			d.mu.Unlock()
 		}
@@ -637,11 +707,20 @@ func (d *Dispatcher) releaseOnFailure(ctx context.Context, projectID string, tas
 	if task.IntentID != "" {
 		d.releaseIntent(ctx, projectID, task.IntentID, workerName)
 	}
-	// Bootstrap 失败时清理标记，允许重试
+	// Bootstrap 失败时清理标记，增加退避
 	if task.Type == worker.TaskBootstrap {
 		d.mu.Lock()
 		delete(d.bootstrapping, projectID)
+		d.bootstrapRetries[projectID]++
+		retries := d.bootstrapRetries[projectID]
+		// 指数退避：10s, 20s, 40s, 80s, 最大 300s
+		backoff := time.Duration(10<<(retries-1)) * time.Second
+		if backoff > 300*time.Second {
+			backoff = 300 * time.Second
+		}
+		d.bootstrapBackoff[projectID] = time.Now().Add(backoff)
 		d.mu.Unlock()
+		log.Printf("[dispatcher] bootstrap failed for project %s (retry #%d, next backoff %v)", projectID, retries, backoff)
 	}
 }
 
@@ -669,6 +748,9 @@ func (d *Dispatcher) recordEvent(projectID, taskType, intentID, workerName, phas
 		return
 	}
 	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[dispatcher] record event returned status %d for project %s phase %s", resp.StatusCode, projectID, phase)
+	}
 }
 
 // tryConclude 双阶段收尾
@@ -761,9 +843,17 @@ func (d *Dispatcher) writeBack(ctx context.Context, projectID string, task *work
 
 	case worker.TaskExplore:
 		if desc, ok := d.extractDescription(dataMap, ""); ok {
+			// 自动标记 [SUCCESS]/[FAILURE]/[BLOCKER]
+			desc = tagFactDescription(desc)
 			log.Printf("[dispatcher] explore concluded for project %s: %s", projectID, truncate(desc, 80))
 			if task.IntentID != "" {
 				d.concludeIntent(ctx, projectID, task.IntentID, desc, workerName)
+			}
+			// 尝试自动提交 flag
+			if d.autoSubmitFn != nil {
+				if result := d.autoSubmitFn(ctx, projectID, desc); result != "" {
+					log.Printf("[dispatcher] auto-submit for project %s: %s", projectID, result)
+				}
 			}
 		}
 	}
@@ -858,7 +948,7 @@ func (d *Dispatcher) concludeIntent(ctx context.Context, projectID, intentID, de
 
 // --- helpers ---
 
-func (d *Dispatcher) selectWorker(taskType worker.TaskType) *config.WorkerConfig {
+func (d *Dispatcher) selectWorker(projectID string, taskType worker.TaskType) *config.WorkerConfig {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -873,6 +963,10 @@ func (d *Dispatcher) selectWorker(taskType worker.TaskType) *config.WorkerConfig
 			continue
 		}
 		if unhealthyUntil, ok := d.workerUnhealthyUntil[w.Name]; ok && now.Before(unhealthyUntil) {
+			continue
+		}
+		rejKey := rejectionKey{projectID, string(taskType), w.Name}
+		if rejUntil, ok := d.workerRejectedUntil[rejKey]; ok && now.Before(rejUntil) {
 			continue
 		}
 		candidates = append(candidates, w)
@@ -898,12 +992,18 @@ func (d *Dispatcher) selectWorker(taskType worker.TaskType) *config.WorkerConfig
 	return best
 }
 
-// markWorkerUnhealthy 标记 worker 不健康，5 秒内不再选用
+// markWorkerUnhealthy 标记 worker 不健康，指数退避（5s, 10s, 20s, ..., 最大 300s）
 func (d *Dispatcher) markWorkerUnhealthy(workerName string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.workerUnhealthyUntil[workerName] = time.Now().Add(5 * time.Second)
-	log.Printf("[dispatcher] worker marked unhealthy worker=%s retry_after=5s", workerName)
+	d.workerUnhealthyCount[workerName]++
+	count := d.workerUnhealthyCount[workerName]
+	backoff := time.Duration(5<<(count-1)) * time.Second
+	if backoff > 300*time.Second {
+		backoff = 300 * time.Second
+	}
+	d.workerUnhealthyUntil[workerName] = time.Now().Add(backoff)
+	log.Printf("[dispatcher] worker marked unhealthy worker=%s count=%d retry_after=%v", workerName, count, backoff)
 }
 
 // markWorkerRejected 标记 (project, task, worker) 组合拒绝，5 秒内不再选用
@@ -931,11 +1031,14 @@ func (d *Dispatcher) canDispatch() bool {
 }
 
 func (d *Dispatcher) admittedCount() int {
-	count := 0
-	for range d.admitted {
-		count++
-	}
-	return count
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.admittedCountLocked()
+}
+
+// admittedCountLocked 在已持有 mu 的情况下调用
+func (d *Dispatcher) admittedCountLocked() int {
+	return len(d.admitted)
 }
 
 func (d *Dispatcher) getTimeout(taskType worker.TaskType) int {
@@ -1007,13 +1110,241 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// tagFactDescription 根据内容自动标记 [SUCCESS]/[FAILURE]/[BLOCKER]
+func tagFactDescription(desc string) string {
+	lower := strings.ToLower(desc)
+
+	// 已有标签则不重复
+	if strings.HasPrefix(desc, "[SUCCESS]") || strings.HasPrefix(desc, "[FAILURE]") || strings.HasPrefix(desc, "[BLOCKER]") {
+		return desc
+	}
+
+	// BLOCKER 关键词
+	blockerKW := []string{
+		"connection refused", "no route to host", "host unreachable",
+		"service not running", "port closed", "filtered",
+		"access denied permanently", "firewall blocked",
+	}
+	for _, kw := range blockerKW {
+		if strings.Contains(lower, kw) {
+			return "[BLOCKER] " + desc
+		}
+	}
+
+	// FAILURE 关键词
+	failureKW := []string{
+		"not vulnerable", "failed", "exploit failed", "no vulnerability",
+		"timeout", "unable to", "could not", "unsuccessful",
+		"permission denied", "authentication failed", "payload did not",
+		"no results", "nothing found", "未发现", "失败", "无法",
+	}
+	for _, kw := range failureKW {
+		if strings.Contains(lower, kw) {
+			return "[FAILURE] " + desc
+		}
+	}
+
+	// SUCCESS 关键词
+	successKW := []string{
+		"found", "discovered", "vulnerable", "exploited", "obtained",
+		"credential", "password", "token", "flag", "shell", "access gained",
+		"rce confirmed", "injection successful", "leaked",
+		"发现", "成功", "获取", "获得",
+	}
+	for _, kw := range successKW {
+		if strings.Contains(lower, kw) {
+			return "[SUCCESS] " + desc
+		}
+	}
+
+	return desc
+}
+
+// extractAncestorChain 提取 intent 的祖先链路（只保留从 origin 到当前 intent 的 fact/intent 路径）
+func extractAncestorChain(detail *models.ProjectDetailResponse, targetIntent *models.Intent) *models.ProjectDetailResponse {
+	if detail == nil || targetIntent == nil {
+		return detail
+	}
+
+	// BFS 反向追溯祖先 fact
+	neededFacts := make(map[string]bool)
+	neededIntents := make(map[string]bool)
+
+	// 始终包含 origin 和 goal
+	neededFacts["origin"] = true
+	neededFacts["goal"] = true
+
+	// 当前 intent 的 from facts 入队
+	queue := make([]string, 0)
+	for _, fromID := range targetIntent.From {
+		neededFacts[fromID] = true
+		queue = append(queue, fromID)
+	}
+
+	// 建索引：fact -> 产生它的 intent
+	factProducer := make(map[string]*models.Intent)
+	for i := range detail.Intents {
+		intent := &detail.Intents[i]
+		if intent.To != nil {
+			factProducer[*intent.To] = intent
+		}
+	}
+
+	// BFS 追溯
+	for len(queue) > 0 {
+		factID := queue[0]
+		queue = queue[1:]
+
+		producer, ok := factProducer[factID]
+		if !ok {
+			continue
+		}
+		neededIntents[producer.ID] = true
+		for _, fromID := range producer.From {
+			if !neededFacts[fromID] {
+				neededFacts[fromID] = true
+				queue = append(queue, fromID)
+			}
+		}
+	}
+
+	// 包含目标 intent 本身
+	neededIntents[targetIntent.ID] = true
+
+	// 构造过滤后的 detail
+	filteredFacts := make([]models.Fact, 0)
+	for _, f := range detail.Facts {
+		if neededFacts[f.ID] {
+			filteredFacts = append(filteredFacts, f)
+		}
+	}
+
+	filteredIntents := make([]models.Intent, 0)
+	for _, i := range detail.Intents {
+		if neededIntents[i.ID] {
+			filteredIntents = append(filteredIntents, i)
+		}
+	}
+
+	return &models.ProjectDetailResponse{
+		Project: detail.Project,
+		Facts:   filteredFacts,
+		Intents: filteredIntents,
+		Hints:   detail.Hints,
+	}
+}
+
+// pruneDeadEnds 图剪枝：折叠 BLOCKER/FAILURE 死胡同分支，返回剪枝后的 detail 副本
+func pruneDeadEnds(detail *models.ProjectDetailResponse) *models.ProjectDetailResponse {
+	if detail == nil {
+		return nil
+	}
+
+	// 标记死胡同 fact（以 [BLOCKER] 或 [FAILURE] 开头）
+	deadFacts := make(map[string]bool)
+	for _, f := range detail.Facts {
+		if strings.HasPrefix(f.Description, "[BLOCKER]") || strings.HasPrefix(f.Description, "[FAILURE]") {
+			deadFacts[f.ID] = true
+		}
+	}
+
+	// 保留存活的 facts 和 intents，死胡同压缩为摘要
+	prunedFacts := make([]models.Fact, 0, len(detail.Facts))
+	for _, f := range detail.Facts {
+		if f.ID == "origin" || f.ID == "goal" || !deadFacts[f.ID] {
+			prunedFacts = append(prunedFacts, f)
+		} else {
+			prunedFacts = append(prunedFacts, models.Fact{
+				ID:          f.ID,
+				Description: "[PRUNED] " + truncate(f.Description, 60),
+			})
+		}
+	}
+
+	prunedIntents := make([]models.Intent, 0, len(detail.Intents))
+	for _, i := range detail.Intents {
+		if i.To != nil && deadFacts[*i.To] {
+			prunedIntents = append(prunedIntents, models.Intent{
+				ID:          i.ID,
+				From:        i.From,
+				To:          i.To,
+				Description: "[PRUNED] " + truncate(i.Description, 40),
+				Creator:     i.Creator,
+				ConcludedAt: i.ConcludedAt,
+			})
+		} else {
+			prunedIntents = append(prunedIntents, i)
+		}
+	}
+
+	return &models.ProjectDetailResponse{
+		Project: detail.Project,
+		Facts:   prunedFacts,
+		Intents: prunedIntents,
+		Hints:   detail.Hints,
+	}
+}
+
+// scoreIntent 按关键词对 intent 打分，高价值优先调度
+// flag > exploit > credential/shell > privilege > injection > recon
+func scoreIntent(description string) int {
+	lower := strings.ToLower(description)
+	score := 0
+
+	// 最高优先级：直接目标相关
+	flagKeywords := []string{"flag", "ctf", "getflag", "get_flag", "read flag", "capture"}
+	for _, kw := range flagKeywords {
+		if strings.Contains(lower, kw) {
+			score += 100
+		}
+	}
+
+	// 高优先级：利用类
+	exploitKeywords := []string{"exploit", "rce", "remote code", "command injection", "code execution",
+		"reverse shell", "shell", "payload", "漏洞利用", "getshell"}
+	for _, kw := range exploitKeywords {
+		if strings.Contains(lower, kw) {
+			score += 80
+		}
+	}
+
+	// 中高优先级：凭证/提权
+	credentialKeywords := []string{"credential", "password", "token", "secret", "api_key", "apikey",
+		"jwt", "session", "cookie", "auth", "login", "密码", "凭证", "提权", "privilege", "escalat", "sudo", "suid"}
+	for _, kw := range credentialKeywords {
+		if strings.Contains(lower, kw) {
+			score += 60
+		}
+	}
+
+	// 中优先级：注入类
+	injectionKeywords := []string{"inject", "sqli", "sql注入", "xss", "ssrf", "lfi", "rfi",
+		"deserialization", "反序列化", "file inclusion", "upload"}
+	for _, kw := range injectionKeywords {
+		if strings.Contains(lower, kw) {
+			score += 40
+		}
+	}
+
+	// 低优先级：侦查
+	reconKeywords := []string{"scan", "enum", "recon", "discover", "扫描", "探测", "侦查",
+		"dirsearch", "nmap", "nikto", "information", "fingerprint"}
+	for _, kw := range reconKeywords {
+		if strings.Contains(lower, kw) {
+			score += 20
+		}
+	}
+
+	return score
+}
+
 // --- Server API helpers ---
 
 // heartbeatIntent 通过 Server API 认领/续约 intent
 func (d *Dispatcher) heartbeatIntent(ctx context.Context, projectID, intentID, workerName string) int {
-	body := fmt.Sprintf(`{"worker":"%s"}`, workerName)
+	bodyBytes, _ := json.Marshal(map[string]string{"worker": workerName})
 	url := fmt.Sprintf("%s/api/projects/%s/intents/%s/heartbeat", d.cfg.Server, projectID, intentID)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.client.Do(req)
@@ -1027,9 +1358,9 @@ func (d *Dispatcher) heartbeatIntent(ctx context.Context, projectID, intentID, w
 
 // releaseIntent 释放 intent 认领
 func (d *Dispatcher) releaseIntent(ctx context.Context, projectID, intentID, workerName string) {
-	body := fmt.Sprintf(`{"worker":"%s"}`, workerName)
+	bodyBytes, _ := json.Marshal(map[string]string{"worker": workerName})
 	url := fmt.Sprintf("%s/api/projects/%s/intents/%s/release", d.cfg.Server, projectID, intentID)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.client.Do(req)
@@ -1042,9 +1373,9 @@ func (d *Dispatcher) releaseIntent(ctx context.Context, projectID, intentID, wor
 
 // claimReason 通过 Server API 认领 reason
 func (d *Dispatcher) claimReason(ctx context.Context, projectID, workerName, trigger string) int {
-	body := fmt.Sprintf(`{"worker":"%s","trigger":"%s"}`, workerName, trigger)
+	bodyBytes, _ := json.Marshal(map[string]string{"worker": workerName, "trigger": trigger})
 	url := fmt.Sprintf("%s/api/projects/%s/reason/claim", d.cfg.Server, projectID)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.client.Do(req)
@@ -1058,9 +1389,9 @@ func (d *Dispatcher) claimReason(ctx context.Context, projectID, workerName, tri
 
 // releaseReason 释放 reason 认领
 func (d *Dispatcher) releaseReason(ctx context.Context, projectID, workerName string) {
-	body := fmt.Sprintf(`{"worker":"%s"}`, workerName)
+	bodyBytes, _ := json.Marshal(map[string]string{"worker": workerName})
 	url := fmt.Sprintf("%s/api/projects/%s/reason/release", d.cfg.Server, projectID)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.client.Do(req)

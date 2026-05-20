@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ptagent/ptagent/internal/agent"
 	"github.com/ptagent/ptagent/internal/config"
 	"github.com/ptagent/ptagent/internal/dispatcher"
 	"github.com/ptagent/ptagent/internal/models"
@@ -15,16 +17,31 @@ import (
 type Handler struct {
 	store       store.Store
 	dispatchers *dispatcher.Manager
+	sseHub      *SSEHub
+	agentMu     sync.RWMutex
+	agent       *agent.PlatformAgent
 }
 
 // NewHandler 创建 API handler
 func NewHandler(s store.Store) *Handler {
-	return &Handler{store: s}
+	return &Handler{store: s, sseHub: NewSSEHub()}
+}
+
+// SSEHub 返回 SSE hub 引用（供外部广播事件）
+func (h *Handler) SSEHub() *SSEHub {
+	return h.sseHub
 }
 
 // SetDispatcherManager 设置 dispatcher 管理器（可选）
 func (h *Handler) SetDispatcherManager(m *dispatcher.Manager) {
 	h.dispatchers = m
+}
+
+// SetPlatformAgent 设置平台 Agent（可选）
+func (h *Handler) SetPlatformAgent(a *agent.PlatformAgent) {
+	h.agentMu.Lock()
+	h.agent = a
+	h.agentMu.Unlock()
 }
 
 // RegisterRoutes 注册所有路由
@@ -76,6 +93,35 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/dispatchers/:disp_id/start", h.StartDispatcher)
 		api.POST("/dispatchers/:disp_id/stop", h.StopDispatcher)
 		api.DELETE("/dispatchers/:disp_id", h.DeleteDispatcher)
+
+		// SSE streaming
+		api.GET("/events/stream", h.StreamEvents)
+		api.POST("/events/report", h.ReportProgress)
+
+		// Metrics
+		api.GET("/metrics", h.GetMetrics)
+
+		// Platform Agent
+		api.POST("/agent/chat", h.AgentChat)
+		api.GET("/agent/config", h.GetAgentConfig)
+		api.PUT("/agent/config", h.UpdateAgentConfig)
+
+		// CTFd Integration
+		ctfdGroup := api.Group("/ctfd")
+		{
+			ctfdGroup.GET("/instances", h.ListCTFdInstances)
+			ctfdGroup.POST("/instances", h.AddCTFdInstance)
+			ctfdGroup.DELETE("/instances/:inst_id", h.DeleteCTFdInstance)
+			ctfdGroup.GET("/instances/:inst_id/challenges", h.ListCTFdChallenges)
+			ctfdGroup.GET("/instances/:inst_id/challenges/:chall_id", h.GetCTFdChallenge)
+			ctfdGroup.POST("/instances/:inst_id/challenges/:chall_id/submit", h.SubmitCTFdFlag)
+			ctfdGroup.POST("/instances/:inst_id/challenges/:chall_id/import", h.ImportCTFdChallenge)
+			ctfdGroup.GET("/instances/:inst_id/challenges/:chall_id/instance", h.GetCTFdInstanceStatus)
+			ctfdGroup.POST("/instances/:inst_id/challenges/:chall_id/instance/start", h.StartCTFdInstance)
+			ctfdGroup.POST("/instances/:inst_id/challenges/:chall_id/instance/stop", h.StopCTFdInstance)
+			ctfdGroup.POST("/instances/:inst_id/challenges/:chall_id/instance/renew", h.RenewCTFdInstance)
+			ctfdGroup.GET("/instances/:inst_id/files/*filepath", h.ProxyCTFdFile)
+		}
 	}
 }
 
@@ -242,6 +288,7 @@ func (h *Handler) CreateIntent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.sseHub.Broadcast(SSEEvent{Type: "intent_created", ProjectID: projectID, Data: intent})
 	c.JSON(http.StatusCreated, intent)
 }
 
@@ -290,6 +337,8 @@ func (h *Handler) ConcludeIntent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.sseHub.Broadcast(SSEEvent{Type: "intent_concluded", ProjectID: projectID, Data: resp})
+	h.sseHub.Broadcast(SSEEvent{Type: "fact_created", ProjectID: projectID, Data: resp.Fact})
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -382,6 +431,17 @@ func (h *Handler) RecordTaskEvent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// 广播任务事件
+	eventType := "task_update"
+	switch event.Phase {
+	case "dispatched":
+		eventType = "task_dispatched"
+	case "succeed":
+		eventType = "task_completed"
+	case "failed":
+		eventType = "task_failed"
+	}
+	h.sseHub.Broadcast(SSEEvent{Type: eventType, ProjectID: projectID, Data: event})
 	c.JSON(http.StatusCreated, event)
 }
 

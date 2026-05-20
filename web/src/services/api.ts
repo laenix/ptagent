@@ -69,7 +69,15 @@ export interface Settings {
 async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
   if (body) opts.body = JSON.stringify(body)
-  const r = await fetch(path, opts)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30000)
+  opts.signal = controller.signal
+  let r: Response
+  try {
+    r = await fetch(path, opts)
+  } finally {
+    clearTimeout(timeout)
+  }
   if (r.status === 204) return null as T
   const data = await r.json()
   if (!r.ok) {
@@ -253,4 +261,191 @@ export function stopDispatcher(id: string) {
 
 export function deleteDispatcher(id: string) {
   return api<void>('DELETE', `${API_BASE}/dispatchers/${id}`)
+}
+
+// --- SSE Streaming ---
+
+export interface SSEEvent {
+  type: string
+  project_id: string
+  data: unknown
+}
+
+export function connectSSE(onEvent: (event: SSEEvent) => void): EventSource {
+  const es = new EventSource(`${API_BASE}/events/stream`)
+
+  const eventTypes = ['task_dispatched', 'task_completed', 'task_failed', 'task_update',
+    'intent_created', 'intent_concluded', 'fact_created', 'project_update', 'metrics']
+
+  for (const type of eventTypes) {
+    es.addEventListener(type, (e: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(e.data) as SSEEvent
+        onEvent(parsed)
+      } catch { /* ignore parse errors */ }
+    })
+  }
+
+  return es
+}
+
+// --- Metrics ---
+
+export interface ProjectMetrics {
+  id: string
+  title: string
+  status: string
+  fact_count: number
+  intent_count: number
+  open_intent_count: number
+  concluded_intent_count: number
+  working_intent_count: number
+  unclaimed_intent_count: number
+  hint_count: number
+  success_fact_count: number
+  failure_fact_count: number
+  blocker_fact_count: number
+}
+
+export interface MetricsResponse {
+  total_projects: number
+  active_projects: number
+  completed_projects: number
+  stopped_projects: number
+  total_facts: number
+  total_intents: number
+  total_open_intents: number
+  total_hints: number
+  sse_clients: number
+  projects: ProjectMetrics[]
+}
+
+export function getMetrics() {
+  return api<MetricsResponse>('GET', `${API_BASE}/metrics`)
+}
+
+// --- CTFd Integration ---
+
+export interface CTFdInstance {
+  id: string
+  name: string
+  url: string
+  created_at: string
+}
+
+export interface CTFdFile {
+  id: number
+  location: string
+}
+
+export interface CTFdChallenge {
+  id: number
+  name: string
+  category: string
+  description: string
+  value: number
+  solves: number
+  type: string
+  tags: string[]
+  files: CTFdFile[]
+  solved: boolean
+  connection_info: string
+  max_attempts: number
+  attempts: number
+}
+
+export interface CTFdSubmitResponse {
+  status: string
+  message: string
+}
+
+export function listCTFdInstances() {
+  return api<CTFdInstance[]>('GET', `${API_BASE}/ctfd/instances`)
+}
+
+export function addCTFdInstance(data: { name: string; url: string; token: string }) {
+  return api<CTFdInstance>('POST', `${API_BASE}/ctfd/instances`, data)
+}
+
+export function deleteCTFdInstance(id: string) {
+  return api<void>('DELETE', `${API_BASE}/ctfd/instances/${id}`)
+}
+
+export function listCTFdChallenges(instanceId: string) {
+  return api<CTFdChallenge[]>('GET', `${API_BASE}/ctfd/instances/${instanceId}/challenges`)
+}
+
+export function getCTFdChallenge(instanceId: string, challengeId: number) {
+  return api<CTFdChallenge>('GET', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}`)
+}
+
+export function submitCTFdFlag(instanceId: string, challengeId: number, flag: string) {
+  return api<CTFdSubmitResponse>('POST', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/submit`, { flag })
+}
+
+export function importCTFdChallenge(instanceId: string, challengeId: number) {
+  return api<{ project: unknown; challenge: CTFdChallenge }>('POST', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/import`)
+}
+
+export function ctfdFileUrl(instanceId: string, filePath: string) {
+  return `${API_BASE}/ctfd/instances/${instanceId}/files/${filePath}`
+}
+
+// --- CTFd Challenge Instance (靶机) ---
+
+export interface CTFdInstanceStatus {
+  running: boolean
+  instance?: {
+    challenge_id: number
+    ip: string
+    port: number
+    status: string
+    lan_address: string
+    message: string
+  }
+}
+
+export function getCTFdInstanceStatus(instanceId: string, challengeId: number) {
+  return api<CTFdInstanceStatus>('GET', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/instance`)
+}
+
+export function startCTFdInstance(instanceId: string, challengeId: number) {
+  return api<CTFdInstanceStatus>('POST', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/instance/start`)
+}
+
+export function stopCTFdInstance(instanceId: string, challengeId: number) {
+  return api<{ running: boolean }>('POST', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/instance/stop`)
+}
+
+export function renewCTFdInstance(instanceId: string, challengeId: number) {
+  return api<{ renewed: boolean }>('POST', `${API_BASE}/ctfd/instances/${instanceId}/challenges/${challengeId}/instance/renew`)
+}
+
+// --- Platform Agent ---
+
+export interface AgentAction {
+  type: string
+  detail: string
+  result: string
+}
+
+export interface AgentChatResponse {
+  reply: string
+  actions?: AgentAction[]
+}
+
+export interface AgentConfig {
+  configured: boolean
+}
+
+export function agentChat(message: string) {
+  return api<AgentChatResponse>('POST', `${API_BASE}/agent/chat`, { message })
+}
+
+export function getAgentConfig() {
+  return api<AgentConfig>('GET', `${API_BASE}/agent/config`)
+}
+
+export function updateAgentConfig(config: { llm_base_url: string; llm_api_key: string; llm_model: string }) {
+  return api<{ configured: boolean }>('PUT', `${API_BASE}/agent/config`, config)
 }

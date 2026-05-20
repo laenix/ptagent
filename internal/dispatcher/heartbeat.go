@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,7 +25,7 @@ type HeartbeatLease struct {
 
 	mu            sync.Mutex
 	failure       *HeartbeatFailure
-	lastSuccessAt time.Time // 最近一次心跳成功时间，用于 grace period 判断
+	failStartedAt time.Time // 连续失败开始时间（零值表示没有持续失败）
 	cancel        context.CancelFunc
 	done          chan struct{}
 
@@ -41,28 +42,26 @@ type HeartbeatFailure struct {
 // NewIntentHeartbeat 创建 intent 心跳
 func NewIntentHeartbeat(client *http.Client, serverURL, projectID, intentID, workerName string, interval time.Duration) *HeartbeatLease {
 	return &HeartbeatLease{
-		client:        client,
-		serverURL:     serverURL,
-		interval:      interval,
-		projectID:     projectID,
-		intentID:      intentID,
-		workerName:    workerName,
-		lastSuccessAt: time.Now(),
-		done:          make(chan struct{}),
+		client:     client,
+		serverURL:  serverURL,
+		interval:   interval,
+		projectID:  projectID,
+		intentID:   intentID,
+		workerName: workerName,
+		done:       make(chan struct{}),
 	}
 }
 
 // NewReasonHeartbeat 创建 reason 心跳
 func NewReasonHeartbeat(client *http.Client, serverURL, projectID, workerName string, interval time.Duration) *HeartbeatLease {
 	return &HeartbeatLease{
-		client:        client,
-		serverURL:     serverURL,
-		interval:      interval,
-		projectID:     projectID,
-		workerName:    workerName,
-		isReason:      true,
-		lastSuccessAt: time.Now(),
-		done:          make(chan struct{}),
+		client:     client,
+		serverURL:  serverURL,
+		interval:   interval,
+		projectID:  projectID,
+		workerName: workerName,
+		isReason:   true,
+		done:       make(chan struct{}),
 	}
 }
 
@@ -119,8 +118,8 @@ func (h *HeartbeatLease) sendHeartbeat(ctx context.Context) error {
 		url = fmt.Sprintf("%s/api/projects/%s/intents/%s/heartbeat", h.serverURL, h.projectID, h.intentID)
 	}
 
-	body := fmt.Sprintf(`{"worker":"%s"}`, h.workerName)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
+	bodyBytes, _ := json.Marshal(map[string]string{"worker": h.workerName})
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return nil // context cancelled
 	}
@@ -128,12 +127,17 @@ func (h *HeartbeatLease) sendHeartbeat(ctx context.Context) error {
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		// 暂时网络错误，在 grace period 内重试，超过则认定失败
-		elapsed := time.Since(h.lastSuccessAt)
+		// 暂时网络错误，用连续失败时长判断是否超过 grace period
+		h.mu.Lock()
+		if h.failStartedAt.IsZero() {
+			h.failStartedAt = time.Now()
+		}
+		failDuration := time.Since(h.failStartedAt)
+		h.mu.Unlock()
 		grace := h.interval * 2
-		log.Printf("[heartbeat] transient error project=%s worker=%s elapsed=%.1fs grace=%.1fs: %v",
-			h.projectID, h.workerName, elapsed.Seconds(), grace.Seconds(), err)
-		if elapsed < grace {
+		log.Printf("[heartbeat] transient error project=%s worker=%s fail_duration=%.1fs grace=%.1fs: %v",
+			h.projectID, h.workerName, failDuration.Seconds(), grace.Seconds(), err)
+		if failDuration < grace {
 			return nil // 宽限期内继续重试
 		}
 		h.fail(0)
@@ -148,9 +152,9 @@ func (h *HeartbeatLease) sendHeartbeat(ctx context.Context) error {
 		return fmt.Errorf("lease lost")
 	}
 
-	// 心跳成功，更新最近成功时间
+	// 心跳成功，重置连续失败计时
 	h.mu.Lock()
-	h.lastSuccessAt = time.Now()
+	h.failStartedAt = time.Time{}
 	h.mu.Unlock()
 	return nil
 }

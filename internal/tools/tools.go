@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -58,6 +59,8 @@ func (e *Executor) Execute(ctx context.Context, name string, args map[string]int
 	switch name {
 	case "http_request":
 		return e.httpRequest(ctx, args)
+	case "shell_exec":
+		return e.shellExec(ctx, args)
 	case "python_exec":
 		return e.pythonExec(ctx, args)
 	default:
@@ -127,9 +130,56 @@ func (e *Executor) httpRequest(ctx context.Context, args map[string]interface{})
 	return &ToolResult{Output: sb.String()}
 }
 
-// pythonExec 暂未实现
+// pythonExec 执行 Python 代码
 func (e *Executor) pythonExec(ctx context.Context, args map[string]interface{}) *ToolResult {
-	return &ToolResult{Error: "python_exec not yet implemented"}
+	code, _ := args["code"].(string)
+	if code == "" {
+		return &ToolResult{Error: "code is required"}
+	}
+
+	timeout := 120 * time.Second
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, "python3", "-c", code)
+	output, err := cmd.CombinedOutput()
+	result := string(output)
+	const maxOutput = 64 * 1024
+	if len(result) > maxOutput {
+		result = result[:maxOutput] + "\n... [truncated]"
+	}
+	if err != nil {
+		return &ToolResult{Output: result, Error: err.Error()}
+	}
+	return &ToolResult{Output: result}
+}
+
+// shellExec 执行 Shell 命令
+func (e *Executor) shellExec(ctx context.Context, args map[string]interface{}) *ToolResult {
+	command, _ := args["command"].(string)
+	if command == "" {
+		return &ToolResult{Error: "command is required"}
+	}
+
+	timeout := 120
+	if t, ok := args["timeout"].(float64); ok && t > 0 && t <= 600 {
+		timeout = int(t)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
+	output, err := cmd.CombinedOutput()
+	result := string(output)
+	const maxOutput = 64 * 1024
+	if len(result) > maxOutput {
+		result = result[:maxOutput] + "\n... [truncated]"
+	}
+	if err != nil {
+		return &ToolResult{Output: result, Error: err.Error()}
+	}
+	return &ToolResult{Output: result}
 }
 
 // AvailableTools 返回可用工具的 OpenAI function 格式定义
@@ -172,7 +222,7 @@ func AvailableTools() []map[string]interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "shell_exec",
-				"description": "Execute a shell command. Use for running tools like nmap, sqlmap, gobuster, curl, etc.",
+				"description": "Execute a shell command. Use for running tools like nmap, sqlmap, gobuster, curl, hashcat, john, openssl, etc. Also useful for piping data, file operations, and chaining commands.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -182,7 +232,7 @@ func AvailableTools() []map[string]interface{} {
 						},
 						"timeout": map[string]interface{}{
 							"type":        "integer",
-							"description": "Timeout in seconds (default 120)",
+							"description": "Timeout in seconds (default 120, max 600)",
 						},
 					},
 					"required": []string{"command"},
@@ -193,7 +243,7 @@ func AvailableTools() []map[string]interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "python_exec",
-				"description": "Execute Python code. Use for writing exploit scripts, data processing, or complex logic.",
+				"description": "Execute Python code. Use for writing exploit scripts, data processing, complex logic, and cryptography tasks. Available libraries include: pycryptodome (AES/RSA/DES/ChaCha20), hashlib, base64, binascii, struct, gmpy2 (for RSA math), sympy (symbolic math), z3-solver (constraint solving/SAT). Use for: block cipher attacks (ECB/CBC padding oracle/bit flipping), RSA (factoring/Wiener/Boneh-Durfee/Hastad/CRT), hash cracking/length extension, classical ciphers (Caesar/Vigenere/substitution), XOR analysis, encoding/decoding, and custom crypto exploitation.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

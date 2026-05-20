@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ptagent/ptagent/internal/agent"
 	"github.com/ptagent/ptagent/internal/config"
 	"github.com/ptagent/ptagent/internal/dispatcher"
 	"github.com/ptagent/ptagent/internal/server/api"
@@ -72,6 +73,20 @@ func main() {
 	dispManager := dispatcher.NewManager()
 	handler.SetDispatcherManager(dispManager)
 
+	// 初始化 Platform Agent（通过环境变量配置 LLM）
+	agentCfg := &agent.Config{
+		LLMBaseURL: os.Getenv("AGENT_LLM_BASE_URL"),
+		LLMAPIKey:  os.Getenv("AGENT_LLM_API_KEY"),
+		LLMModel:   os.Getenv("AGENT_LLM_MODEL"),
+	}
+	platformAgent := agent.New(store, agentCfg)
+	handler.SetPlatformAgent(platformAgent)
+	if agentCfg.LLMAPIKey != "" {
+		log.Println("Platform Agent enabled (LLM configured)")
+	} else {
+		log.Println("Platform Agent enabled (fallback mode, no LLM)")
+	}
+
 	handler.RegisterRoutes(r)
 
 	// Health check
@@ -124,6 +139,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("init dispatcher: %v", err)
 	}
+
+	// 设置自动提交 flag 回调（复用同一 platformAgent 实例）
+	d.SetAutoSubmitFunc(platformAgent.TryAutoSubmitFlag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

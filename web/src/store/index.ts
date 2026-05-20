@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { ProjectSummary, ProjectDetail, Settings, DispatcherInstance, TaskEvent } from '../services/api'
+import type { ProjectSummary, ProjectDetail, Settings, DispatcherInstance, TaskEvent, SSEEvent } from '../services/api'
 import * as api from '../services/api'
 
 export type LayoutMode = 'dagre_tb' | 'dagre_lr' | 'klay_tb' | 'klay_lr' | 'elk_tb' | 'elk_lr'
@@ -18,7 +18,7 @@ interface AppState {
   // Selection
   selectedNode: SelectedNode | null
   selectedFacts: string[]
-  sideTab: 'detail' | 'hints' | 'log' | 'replay'
+  sideTab: 'detail' | 'hints' | 'log' | 'replay' | 'live'
 
   // Layout
   layoutMode: LayoutMode
@@ -49,6 +49,10 @@ interface AppState {
   // Task Events (replay)
   taskEvents: TaskEvent[]
 
+  // Live Progress (SSE)
+  liveEvents: SSEEvent[]
+  sseConnected: boolean
+
   // Toast
   toast: { show: boolean; message: string; type: 'info' | 'error' }
 
@@ -63,7 +67,7 @@ interface AppState {
   setSelectedFacts: (facts: string[]) => void
   toggleFactSelection: (fid: string) => void
   clearSelection: () => void
-  setSideTab: (tab: 'detail' | 'hints' | 'log' | 'replay') => void
+  setSideTab: (tab: 'detail' | 'hints' | 'log' | 'replay' | 'live') => void
   setLayoutMode: (mode: LayoutMode) => void
   setSidePanelWidth: (width: number) => void
   showToast: (message: string, type?: 'info' | 'error') => void
@@ -72,6 +76,8 @@ interface AppState {
   loadSettings: () => Promise<void>
   loadDispatchers: () => Promise<void>
   loadTaskEvents: (projectId: string) => Promise<void>
+  connectSSE: () => void
+  disconnectSSE: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -98,6 +104,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   dispatchers: [],
   settings: { intent_timeout: 5, reason_timeout: 5 },
   taskEvents: [],
+  liveEvents: [],
+  sseConnected: false,
   toast: { show: false, message: '', type: 'info' },
   actorName: localStorage.getItem('ptagent.actorName') || 'Human',
 
@@ -173,8 +181,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   showToast: (message, type = 'info') => {
+    // Clear any pending auto-hide timer
+    const prevTimer = (window as any).__ptagent_toast_timer as ReturnType<typeof setTimeout> | undefined
+    if (prevTimer) clearTimeout(prevTimer)
     set({ toast: { show: true, message, type } })
-    setTimeout(() => set({ toast: { show: false, message: '', type: 'info' } }), 3000)
+    const timer = setTimeout(() => set({ toast: { show: false, message: '', type: 'info' } }), 3000)
+    ;(window as any).__ptagent_toast_timer = timer
   },
 
   setModal: (modal, show) => set({ [modal]: show } as Partial<AppState>),
@@ -209,5 +221,55 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e) {
       console.error(e)
     }
+  },
+
+  connectSSE: () => {
+    const state = get()
+    if (state.sseConnected) return
+
+    // Close any lingering EventSource to prevent duplicates
+    const prev = (window as any).__ptagent_sse as EventSource | undefined
+    if (prev) {
+      prev.close()
+      delete (window as any).__ptagent_sse
+    }
+
+    const es = api.connectSSE((event: SSEEvent) => {
+      const { liveEvents, selectedProjectId, loadProject } = get()
+      // Keep last 50 events
+      const next = [...liveEvents, event].slice(-50)
+      set({ liveEvents: next })
+
+      // Auto-refresh project if the event is for the currently viewed project
+      if (event.project_id && event.project_id === selectedProjectId) {
+        if (['intent_created', 'intent_concluded', 'fact_created', 'task_completed', 'task_failed'].includes(event.type)) {
+          loadProject(selectedProjectId)
+        }
+      }
+    })
+
+    es.onerror = () => {
+      set({ sseConnected: false })
+      // Auto-reconnect after 3s
+      setTimeout(() => {
+        const { sseConnected } = get()
+        if (!sseConnected) get().connectSSE()
+      }, 3000)
+    }
+
+    es.onopen = () => set({ sseConnected: true })
+
+    // Store EventSource ref for cleanup
+    ;(window as any).__ptagent_sse = es
+    set({ sseConnected: true })
+  },
+
+  disconnectSSE: () => {
+    const es = (window as any).__ptagent_sse as EventSource | undefined
+    if (es) {
+      es.close()
+      delete (window as any).__ptagent_sse
+    }
+    set({ sseConnected: false })
   },
 }))

@@ -2,6 +2,7 @@ package corrector
 
 import (
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -196,13 +197,17 @@ func defaultAbandonPatterns() []string {
 	}
 }
 
+var cveRegex = regexp.MustCompile(`(?i)\bCVE-\d{4}-\d{4,}\b`)
+
 func extractCVEs(text string) []string {
+	matches := cveRegex.FindAllString(text, -1)
+	seen := make(map[string]bool, len(matches))
 	var cves []string
-	// 简单的 CVE 提取
-	parts := strings.Fields(text)
-	for _, p := range parts {
-		if strings.HasPrefix(strings.ToUpper(p), "CVE-") && len(p) > 8 {
-			cves = append(cves, strings.ToUpper(p))
+	for _, m := range matches {
+		upper := strings.ToUpper(m)
+		if !seen[upper] {
+			seen[upper] = true
+			cves = append(cves, upper)
 		}
 	}
 	return cves

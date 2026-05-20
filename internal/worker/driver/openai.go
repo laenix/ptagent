@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ptagent/ptagent/internal/config"
@@ -144,6 +145,11 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 	// 判断是否启用工具（只有 explore 类型的任务启用工具）
 	useTools := (task.Type == worker.TaskExplore)
 
+	// 工具调用去重检测（连续重复调用同一工具+参数 → 强制结束）
+	var lastToolSig string
+	dupCount := 0
+	const maxDupRounds = 2
+
 	// 多轮工具调用循环
 	for round := 0; round < maxToolRounds; round++ {
 		resp, err := d.chat(ctx, messages, useTools)
@@ -163,41 +169,73 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 			// 将 assistant 消息加入历史
 			messages = append(messages, msg)
 
-			// 执行每个工具调用
-			for _, tc := range msg.ToolCalls {
-				log.Printf("[%s] tool call: %s(%s)", d.name, tc.Function.Name, truncateStr(tc.Function.Arguments, 200))
-
-				var args map[string]interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-
-				var result *tools.ToolResult
-				if d.containerExec != nil {
-					// 通过容器内 tool-agent 执行
-					result = d.containerExec(ctx, tc.Function.Name, args)
-				} else {
-					// 本地执行（fallback）
-					result = d.toolExecutor.Execute(ctx, tc.Function.Name, args)
-				}
-
-				var output string
-				if result.Error != "" {
-					output = "ERROR: " + result.Error
-				} else {
-					output = result.Output
-					// 截断过长的输出
-					if len(output) > 16000 {
-						output = output[:16000] + "\n... [truncated]"
+			// 去重检测：生成本轮所有 tool call 的签名
+			sig := toolCallSignature(msg.ToolCalls)
+			if sig == lastToolSig {
+				dupCount++
+				if dupCount >= maxDupRounds {
+					log.Printf("[%s] detected %d duplicate tool call rounds, forcing conclusion", d.name, dupCount)
+					messages = append(messages, chatMessage{
+						Role:    "user",
+						Content: "You are repeating the same tool calls. Stop calling tools and return your findings now as JSON: {\"accepted\": true, \"data\": {\"description\": \"your findings\"}}",
+					})
+					// 不使用工具，让 LLM 返回结论
+					resp2, err := d.chat(ctx, messages, false)
+					if err == nil && len(resp2.Choices) > 0 {
+						content := resp2.Choices[0].Message.Content
+						content = stripThinkBlock(content)
+						content = extractJSONFromMarkdown(content)
+						var result worker.TaskResult
+						if err := json.Unmarshal([]byte(content), &result); err == nil {
+							return &result, nil
+						}
 					}
+					return nil, fmt.Errorf("stuck in duplicate tool calls after %d rounds", round+1)
 				}
+			} else {
+				dupCount = 0
+			}
+			lastToolSig = sig
 
+			// 并行执行工具调用
+			type toolOutput struct {
+				idx    int
+				tc     toolCall
+				output string
+			}
+
+			results := make([]toolOutput, len(msg.ToolCalls))
+			if len(msg.ToolCalls) == 1 {
+				// 单个工具调用，直接执行
+				tc := msg.ToolCalls[0]
+				log.Printf("[%s] tool call: %s(%s)", d.name, tc.Function.Name, truncateStr(tc.Function.Arguments, 200))
+				output := d.executeTool(ctx, tc)
 				log.Printf("[%s] tool result: %s", d.name, truncateStr(output, 500))
+				results[0] = toolOutput{idx: 0, tc: tc, output: output}
+			} else {
+				// 多个工具调用，并行执行
+				log.Printf("[%s] executing %d tool calls in parallel", d.name, len(msg.ToolCalls))
+				var wg sync.WaitGroup
+				for i, tc := range msg.ToolCalls {
+					wg.Add(1)
+					go func(idx int, tc toolCall) {
+						defer wg.Done()
+						log.Printf("[%s] tool call [%d]: %s(%s)", d.name, idx, tc.Function.Name, truncateStr(tc.Function.Arguments, 200))
+						output := d.executeTool(ctx, tc)
+						log.Printf("[%s] tool result [%d]: %s", d.name, idx, truncateStr(output, 500))
+						results[idx] = toolOutput{idx: idx, tc: tc, output: output}
+					}(i, tc)
+				}
+				wg.Wait()
+			}
 
-				// 添加工具结果消息
+			// 按顺序添加工具结果消息
+			for _, r := range results {
 				messages = append(messages, chatMessage{
 					Role:       "tool",
-					Content:    output,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
+					Content:    r.output,
+					ToolCallID: r.tc.ID,
+					Name:       r.tc.Function.Name,
 				})
 			}
 			continue // 继续下一轮
@@ -239,6 +277,43 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 	}
 
 	return nil, fmt.Errorf("exceeded max tool call rounds (%d)", maxToolRounds)
+}
+
+// executeTool 执行单个工具调用，返回输出字符串
+func (d *OpenAIDriver) executeTool(ctx context.Context, tc toolCall) string {
+	var args map[string]interface{}
+	json.Unmarshal([]byte(tc.Function.Arguments), &args)
+
+	var result *tools.ToolResult
+	if d.containerExec != nil {
+		result = d.containerExec(ctx, tc.Function.Name, args)
+	} else {
+		result = d.toolExecutor.Execute(ctx, tc.Function.Name, args)
+	}
+
+	var output string
+	if result.Error != "" {
+		output = "ERROR: " + result.Error
+		if result.Output != "" {
+			output += "\n" + result.Output
+		}
+	} else {
+		output = result.Output
+	}
+	// 截断过长的输出
+	if len(output) > 16000 {
+		output = output[:16000] + "\n... [truncated]"
+	}
+	return output
+}
+
+// toolCallSignature 生成工具调用签名，用于去重检测
+func toolCallSignature(calls []toolCall) string {
+	var parts []string
+	for _, tc := range calls {
+		parts = append(parts, tc.Function.Name+":"+tc.Function.Arguments)
+	}
+	return strings.Join(parts, "|")
 }
 
 // chat 发起一次 API 调用

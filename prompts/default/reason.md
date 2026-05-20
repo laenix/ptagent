@@ -33,6 +33,9 @@
 - `intent.from` 只能从下面的合法 fact id 中选择。
 - `complete.from` 应引用直接支撑完成结论的 fact id。
 - intent 的 description 应该是具体的、可操作的探索方向。
+- 标记为 `[PRUNED]` 的 fact/intent 代表已被剪枝的死胡同（FAILURE/BLOCKER），**不要**基于它们创建新的 intent。
+- 标记为 `[FAILURE]` 或 `[BLOCKER]` 的 fact 说明该方向已失败或被阻断，应主动回避相同思路。
+- 优先基于 `[SUCCESS]` fact 和无标记 fact 延伸新的探索方向。
 
 ## 上下文
 

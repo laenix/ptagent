@@ -51,4 +51,18 @@ type Store interface {
 
 	// Timeout cleanup
 	CleanupExpiredClaims(ctx context.Context, intentTimeout, reasonTimeout int) error
+
+	// Metrics
+	CountFactTags(ctx context.Context) (map[string]models.FactTagCounts, error)
+
+	// CTFd Instances
+	ListCTFdInstances(ctx context.Context) ([]models.CTFdInstance, error)
+	GetCTFdInstance(ctx context.Context, id string) (*models.CTFdInstance, error)
+	AddCTFdInstance(ctx context.Context, req *models.AddCTFdInstanceRequest) (*models.CTFdInstance, error)
+	DeleteCTFdInstance(ctx context.Context, id string) error
+
+	// CTFd Project Links
+	LinkProjectCTFd(ctx context.Context, link *models.CTFdProjectLink) error
+	GetProjectCTFdLink(ctx context.Context, projectID string) (*models.CTFdProjectLink, error)
+	SetProjectAutoSubmit(ctx context.Context, projectID string, autoSubmit bool) error
 }

@@ -158,6 +158,13 @@ type ConcludeResponse struct {
 	Intent Intent `json:"intent"`
 }
 
+// FactTagCounts 单个项目的 fact 标签统计
+type FactTagCounts struct {
+	SuccessCount int `json:"success_count"`
+	FailureCount int `json:"failure_count"`
+	BlockerCount int `json:"blocker_count"`
+}
+
 // ReopenResponse 重开响应
 type ReopenResponse struct {
 	Project Project `json:"project"`
@@ -189,4 +196,89 @@ type TaskEventFilter struct {
 	Phase    string `form:"phase"`
 	Limit    int    `form:"limit"`
 	Offset   int    `form:"offset"`
+}
+
+// --- CTFd Integration ---
+
+// CTFdInstance 外部 CTFd 平台配置
+type CTFdInstance struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	Token     string    `json:"token,omitempty"` // API Token（列表时不返回）
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// CTFdChallenge CTFd 题目
+type CTFdChallenge struct {
+	ID             int        `json:"id"`
+	Name           string     `json:"name"`
+	Category       string     `json:"category"`
+	Description    string     `json:"description"`
+	Value          int        `json:"value"`
+	Solves         int        `json:"solves"`
+	Type           string     `json:"type"`
+	Tags           []string   `json:"tags"`
+	Files          []CTFdFile `json:"files"`
+	Solved         bool       `json:"solved"`
+	ConnectionInfo string     `json:"connection_info"`
+	MaxAttempts    int        `json:"max_attempts"`
+	Attempts       int        `json:"attempts"`
+}
+
+// CTFdFile CTFd 附件
+type CTFdFile struct {
+	ID       int    `json:"id"`
+	Location string `json:"location"` // 相对路径
+}
+
+// CTFdSubmitRequest 提交 flag
+type CTFdSubmitRequest struct {
+	ChallengeID int    `json:"challenge_id" binding:"required"`
+	Flag        string `json:"flag" binding:"required"`
+}
+
+// CTFdSubmitResponse 提交结果
+type CTFdSubmitResponse struct {
+	Status  string `json:"status"` // correct / incorrect / already_solved
+	Message string `json:"message"`
+}
+
+// CTFdImportRequest 从 CTFd 题目导入为项目
+type CTFdImportRequest struct {
+	InstanceID  string `json:"instance_id" binding:"required"`
+	ChallengeID int    `json:"challenge_id" binding:"required"`
+}
+
+// AddCTFdInstanceRequest 添加 CTFd 实例
+type AddCTFdInstanceRequest struct {
+	Name  string `json:"name" binding:"required"`
+	URL   string `json:"url" binding:"required"`
+	Token string `json:"token" binding:"required"`
+}
+
+// CTFdProjectLink 项目与 CTFd 题目的关联
+type CTFdProjectLink struct {
+	ProjectID       string `json:"project_id"`
+	CTFdInstanceID  string `json:"ctfd_instance_id"`
+	CTFdChallengeID int    `json:"ctfd_challenge_id"`
+	AutoSubmit      bool   `json:"auto_submit"`
+}
+
+// AgentChatRequest 平台 Agent 聊天请求
+type AgentChatRequest struct {
+	Message string `json:"message" binding:"required"`
+}
+
+// AgentChatResponse 平台 Agent 聊天响应
+type AgentChatResponse struct {
+	Reply   string        `json:"reply"`
+	Actions []AgentAction `json:"actions,omitempty"`
+}
+
+// AgentAction Agent 执行的操作记录
+type AgentAction struct {
+	Type   string `json:"type"`   // submit_flag, stop_project, reopen_project, etc.
+	Detail string `json:"detail"` // 操作描述
+	Result string `json:"result"` // 操作结果
 }
