@@ -81,7 +81,10 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<T> 
   if (r.status === 204) return null as T
   const data = await r.json()
   if (!r.ok) {
-    const msg = typeof data.detail === 'string' ? data.detail : `HTTP ${r.status}`
+    const msg = (typeof data.detail === 'string' && data.detail) ? data.detail :
+      (typeof data.error === 'string' && data.error) ? data.error :
+        (typeof data.message === 'string' && data.message) ? data.message :
+          `HTTP ${r.status}`
     throw new Error(msg)
   }
   return data as T
