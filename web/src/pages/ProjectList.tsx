@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppStore } from '../store'
 import * as api from '../services/api'
@@ -11,11 +11,25 @@ export default function ProjectList() {
   const isRefreshing = useAppStore(s => s.isRefreshing)
   const navigate = useNavigate()
 
+  const [statusFilter, setStatusFilter] = useState<string>('')
+  const [searchQuery, setSearchQuery] = useState('')
+
   useEffect(() => {
     loadProjects()
     const interval = setInterval(loadProjects, 5000)
     return () => clearInterval(interval)
   }, [loadProjects])
+
+  const filtered = useMemo(() => {
+    return projects.filter(p => {
+      if (statusFilter && p.status !== statusFilter) return false
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase()
+        if (!p.title.toLowerCase().includes(q) && !p.id.toLowerCase().includes(q)) return false
+      }
+      return true
+    })
+  }, [projects, statusFilter, searchQuery])
 
   const countByStatus = (status: string) => projects.filter(p => p.status === status).length
 
@@ -49,22 +63,51 @@ export default function ProjectList() {
         </div>
         <div className="flex-1" />
         <div className="flex items-center gap-3 text-[11px] text-slate-400">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="font-medium uppercase tracking-widest">All</span>
-            <span className="font-semibold text-slate-600 tabular-nums">{projects.length}</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
-            <span className="font-semibold text-teal-700 tabular-nums">{countByStatus('active')}</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-            <span className="font-semibold text-amber-700 tabular-nums">{countByStatus('stopped')}</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
-            <span className="font-semibold text-slate-600 tabular-nums">{countByStatus('completed')}</span>
-          </span>
+          {/* Status filter tabs */}
+          <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+            <button onClick={() => setStatusFilter('')}
+              className={`px-2 py-1 rounded-md transition text-[11px] font-medium ${
+                statusFilter === '' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+              }`}>
+              All <span className="tabular-nums ml-0.5">{projects.length}</span>
+            </button>
+            <button onClick={() => setStatusFilter('active')}
+              className={`px-2 py-1 rounded-md transition text-[11px] font-medium flex items-center gap-1 ${
+                statusFilter === 'active' ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-400 hover:text-teal-600'
+              }`}>
+              <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+              <span className="tabular-nums">{countByStatus('active')}</span>
+            </button>
+            <button onClick={() => setStatusFilter('stopped')}
+              className={`px-2 py-1 rounded-md transition text-[11px] font-medium flex items-center gap-1 ${
+                statusFilter === 'stopped' ? 'bg-white text-amber-700 shadow-sm' : 'text-slate-400 hover:text-amber-600'
+              }`}>
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+              <span className="tabular-nums">{countByStatus('stopped')}</span>
+            </button>
+            <button onClick={() => setStatusFilter('completed')}
+              className={`px-2 py-1 rounded-md transition text-[11px] font-medium flex items-center gap-1 ${
+                statusFilter === 'completed' ? 'bg-white text-slate-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+              }`}>
+              <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+              <span className="tabular-nums">{countByStatus('completed')}</span>
+            </button>
+          </div>
+
+          {/* Search input */}
+          <div className="relative">
+            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-300" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search..."
+              className="h-7 pl-8 pr-3 text-[11px] border border-slate-200 rounded-lg bg-white/80 focus:bg-white focus:outline-none focus:border-indigo-300 w-36 transition"
+            />
+          </div>
+
           <span className="flex items-center gap-1" title={isRefreshing ? 'Syncing...' : 'Live'}>
             <span className={`inline-block w-1.5 h-1.5 rounded-full transition-colors duration-300 ${isRefreshing ? 'bg-sky-400 animate-pulse' : 'bg-emerald-400'}`} />
           </span>
@@ -99,15 +142,22 @@ export default function ProjectList() {
 
       {/* Grid */}
       <div className="flex-1 overflow-y-auto p-4">
-        {projects.length === 0 && (
+        {filtered.length === 0 && projects.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-slate-400">
             <p className="text-lg font-medium text-slate-500">No projects yet</p>
             <p className="text-sm mt-1">Create a project to start exploring</p>
           </div>
         )}
 
+        {filtered.length === 0 && projects.length > 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-slate-400">
+            <p className="text-lg font-medium text-slate-500">No matching projects</p>
+            <p className="text-sm mt-1">Try adjusting your search or filter</p>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-          {projects.map(p => (
+          {filtered.map(p => (
             <div
               key={p.id}
               onClick={() => navigate(`/projects/${p.id}`)}

@@ -198,6 +198,29 @@ type TaskEventFilter struct {
 	Offset   int    `form:"offset"`
 }
 
+// ToolEvent 工具调用事件 — 记录 Worker 中每个工具的调用
+type ToolEvent struct {
+	ID         int64     `json:"id"`
+	ProjectID  string    `json:"project_id"`
+	TaskType  string    `json:"task_type"`  // bootstrap / reason / explore
+	IntentID   string    `json:"intent_id,omitempty"`
+	Worker     string    `json:"worker"`    // 执行的 worker 名
+	Tool      string    `json:"tool"`      // 工具名: http_request, shell_exec, etc.
+	Args       string    `json:"args"`      // 调用参数 JSON
+	Output     string    `json:"output"`    // 执行结果
+	Error      string    `json:"error"`      // 错误信息
+	DurationMs int64     `json:"duration_ms"` // 耗时
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ToolEventFilter 查询过滤
+type ToolEventFilter struct {
+	Tool    string `form:"tool"`
+	Project string `form:"project"`
+	Limit   int    `form:"limit"`
+	Offset  int    `form:"offset"`
+}
+
 // --- CTFd Integration ---
 
 // CTFdInstance 外部 CTFd 平台配置
@@ -281,4 +304,11 @@ type AgentAction struct {
 	Type   string `json:"type"`   // submit_flag, stop_project, reopen_project, etc.
 	Detail string `json:"detail"` // 操作描述
 	Result string `json:"result"` // 操作结果
+}
+
+// AgentConfig 平台 Agent LLM 配置
+type AgentConfig struct {
+	LLMBaseURL string `json:"llm_base_url"`
+	LLMAPIKey  string `json:"llm_api_key,omitempty"`
+	LLMModel   string `json:"llm_model"`
 }

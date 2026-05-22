@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -275,6 +276,8 @@ func (a *PlatformAgent) executeFunction(ctx context.Context, name string, args m
 		return a.fnSetAutoSubmit(ctx, args)
 	case "get_project_ctfd_link":
 		return a.fnGetProjectCTFdLink(ctx, args)
+	case "import_all_challenges":
+		return a.fnImportAllChallenges(ctx, args)
 	default:
 		return fmt.Sprintf("unknown function: %s", name), nil
 	}
@@ -515,6 +518,110 @@ func (a *PlatformAgent) fnGetProjectCTFdLink(ctx context.Context, args map[strin
 		link.ProjectID, link.CTFdInstanceID, link.CTFdChallengeID, link.AutoSubmit), nil
 }
 
+func (a *PlatformAgent) fnImportAllChallenges(ctx context.Context, args map[string]interface{}) (string, *models.AgentAction) {
+	instanceID, _ := args["instance_id"].(string)
+	if instanceID == "" {
+		// 自动选第一个 instance
+		instances, err := a.store.ListCTFdInstances(ctx)
+		if err != nil || len(instances) == 0 {
+			return "No CTFd instances configured.", nil
+		}
+		instanceID = instances[0].ID
+	}
+
+	inst, err := a.store.GetCTFdInstance(ctx, instanceID)
+	if err != nil {
+		return "Error: " + err.Error(), nil
+	}
+
+	client := ctfd.NewClient(inst.URL, inst.Token)
+	challenges, err := client.ListChallenges(ctx)
+	if err != nil {
+		return "Error: " + err.Error(), nil
+	}
+
+	var successCount, skipCount, failCount int
+	var results []string
+
+	for _, ch := range challenges {
+		if ch.Solved {
+			skipCount++
+			results = append(results, fmt.Sprintf("  ⏭ #%d %s (already solved)", ch.ID, ch.Name))
+			continue
+		}
+
+		// 构造 origin
+		origin := fmt.Sprintf("[CTFd] %s (Category: %s, Value: %d pts)\n\n%s", ch.Name, ch.Category, ch.Value, ch.Description)
+		if ch.ConnectionInfo != "" {
+			origin += "\n\nConnection Info: " + ch.ConnectionInfo
+		}
+
+		// 构造 hints
+		var hints []models.CreateHintParams
+		if len(ch.Files) > 0 {
+			fileList := "附件下载链接:\n"
+			for _, f := range ch.Files {
+				proxyURL := fmt.Sprintf("/api/ctfd/instances/%s/files/%s", instanceID, f.Location)
+				fileList += fmt.Sprintf("- %s (proxy: %s)\n", path.Base(f.Location), proxyURL)
+			}
+			hints = append(hints, models.CreateHintParams{
+				Content: fileList,
+				Creator: "CTFd-Agent",
+			})
+		}
+		if len(ch.Tags) > 0 {
+			tagStr := "Tags: "
+			for i, t := range ch.Tags {
+				if i > 0 {
+					tagStr += ", "
+				}
+				tagStr += t
+			}
+			hints = append(hints, models.CreateHintParams{
+				Content: tagStr,
+				Creator: "CTFd-Agent",
+			})
+		}
+
+		req := &models.CreateProjectRequest{
+			Title:  fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
+			Origin: origin,
+			Goal:   "Find and submit the flag for this challenge.",
+			Hints:  hints,
+		}
+
+		project, err := a.store.CreateProject(ctx, req)
+		if err != nil {
+			failCount++
+			results = append(results, fmt.Sprintf("  ❌ #%d %s (create failed: %v)", ch.ID, ch.Name, err))
+			continue
+		}
+
+		// 建立关联
+		autoSubmit := ch.MaxAttempts == 0
+		if err := a.store.LinkProjectCTFd(ctx, &models.CTFdProjectLink{
+			ProjectID:       project.ID,
+			CTFdInstanceID:  instanceID,
+			CTFdChallengeID: ch.ID,
+			AutoSubmit:      autoSubmit,
+		}); err != nil {
+			results = append(results, fmt.Sprintf("  ⚠️ #%d %s (project created but link failed: %v)", ch.ID, ch.Name, err))
+		} else {
+			results = append(results, fmt.Sprintf("  ✅ #%d %s → %s", ch.ID, ch.Name, project.ID))
+		}
+		successCount++
+	}
+
+	summary := fmt.Sprintf("Import completed: %d created, %d skipped (solved), %d failed\n\n%s",
+		successCount, skipCount, failCount, strings.Join(results, "\n"))
+	action := &models.AgentAction{
+		Type:   "import_all_challenges",
+		Detail: fmt.Sprintf("instance=%s total=%d created=%d skipped=%d failed=%d", instanceID, len(challenges), successCount, skipCount, failCount),
+		Result: "completed",
+	}
+	return summary, action
+}
+
 // fallbackChat 无 LLM 时的简单关键词匹配
 func (a *PlatformAgent) fallbackChat(ctx context.Context, message string) (*models.AgentChatResponse, error) {
 	msg := strings.ToLower(message)
@@ -590,6 +697,12 @@ func agentTools() []map[string]interface{} {
 				"project_id": map[string]interface{}{"type": "string", "description": "Project ID"},
 			},
 			"required": []string{"project_id"},
+		}),
+		fnDef("import_all_challenges", "Import all unsolved challenges from a CTFd instance as PTAgent projects. This creates a project for each unsolved challenge and links them to CTFd.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"instance_id": map[string]interface{}{"type": "string", "description": "CTFd instance ID. If empty, uses the first available instance."},
+			},
 		}),
 	}
 }

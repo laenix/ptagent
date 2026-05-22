@@ -65,4 +65,12 @@ type Store interface {
 	LinkProjectCTFd(ctx context.Context, link *models.CTFdProjectLink) error
 	GetProjectCTFdLink(ctx context.Context, projectID string) (*models.CTFdProjectLink, error)
 	SetProjectAutoSubmit(ctx context.Context, projectID string, autoSubmit bool) error
+
+	// Agent Config (LLM)
+	GetAgentConfig(ctx context.Context) (*models.AgentConfig, error)
+	UpdateAgentConfig(ctx context.Context, cfg *models.AgentConfig) error
+
+	// Tool Events (tool call logging)
+	RecordToolEvent(ctx context.Context, event *models.ToolEvent) error
+	ListToolEvents(ctx context.Context, projectID string, filter *models.ToolEventFilter) ([]models.ToolEvent, error)
 }

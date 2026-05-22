@@ -110,7 +110,7 @@ func (d *OpenAIDriver) Healthcheck(ctx context.Context) error {
 // chatMessage 表示一条消息
 type chatMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    string     `json:"content"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
@@ -248,7 +248,16 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 
 		var result worker.TaskResult
 		if err := json.Unmarshal([]byte(content), &result); err != nil {
-			return nil, fmt.Errorf("parse task result: %w (content: %s)", err, truncateStr(content, 500))
+			// JSON 解析失败，尝试把 content 作为纯文本描述
+			text := strings.TrimSpace(content)
+			if text == "" || text == "null" {
+				return nil, fmt.Errorf("parse task result: empty response (content: %s)", truncateStr(content, 500))
+			}
+			log.Printf("[%s] parse task result failed, treating as text: %s", d.name, truncateStr(text, 200))
+			return &worker.TaskResult{
+				Accepted: false,
+				Reason:   text,
+			}, nil
 		}
 		return &result, nil
 	}
@@ -273,6 +282,10 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 		var result worker.TaskResult
 		if err := json.Unmarshal([]byte(content), &result); err == nil {
 			return &result, nil
+		}
+		text := strings.TrimSpace(content)
+		if text != "" && text != "null" {
+			return &worker.TaskResult{Accepted: false, Reason: text}, nil
 		}
 	}
 

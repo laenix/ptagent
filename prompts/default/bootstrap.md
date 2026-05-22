@@ -9,6 +9,28 @@
 - **python_exec**: 执行 Python 代码
 - **http_request**: 发送 HTTP 请求
 
+## CTF 靶场说明
+
+本项目已关联一个 CTFd 靶场题目。你需要通过以下流程与靶机交互：
+
+### CTFd API 工具（在容器中可用）
+
+| 工具 | 说明 |
+|------|------|
+| `get_challenge_instance_status` | 查看靶机实例状态（是否已启动、IP端口等） |
+| `start_challenge_instance` | 启动靶机实例，获取连接信息 |
+| `stop_challenge_instance` | 停止靶机实例 |
+| `submit_ctfd_flag` | 提交 flag 到 CTFd 系统 |
+
+**重要工作流程**：
+1. **首先**调用 `get_challenge_instance_status` 查看靶机实例状态
+2. 如果实例未启动（返回 `running: false`），调用 `start_challenge_instance` 启动
+3. 从响应中获取靶机的 IP 地址和端口
+4. 根据获取的连接信息对目标进行渗透测试
+5. 找到 flag 后用 `submit_ctfd_flag` 提交（只需传入 flag 字符串，靶机信息自动获取）
+
+**注意**：靶机的 IP 和端口不是固定的，必须通过 CTFd API 工具获取后再进行扫描和渗透。
+
 ## 可用工具列表
 
 ### 扫描侦查

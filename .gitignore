@@ -2,8 +2,7 @@ configs/dispatch.yaml
 ctf-files
 ctf-files/*
 ctfd.py
-data
-data/*
+data/
 *.exe
 ptagent-dispatcher
 download_challenges.py

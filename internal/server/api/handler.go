@@ -11,6 +11,7 @@ import (
 	"github.com/ptagent/ptagent/internal/dispatcher"
 	"github.com/ptagent/ptagent/internal/models"
 	"github.com/ptagent/ptagent/internal/store"
+	"github.com/ptagent/ptagent/internal/toollogger"
 )
 
 // Handler API 处理器
@@ -20,6 +21,7 @@ type Handler struct {
 	sseHub      *SSEHub
 	agentMu     sync.RWMutex
 	agent       *agent.PlatformAgent
+	toolLogger  *toollogger.Logger
 }
 
 // NewHandler 创建 API handler
@@ -42,6 +44,11 @@ func (h *Handler) SetPlatformAgent(a *agent.PlatformAgent) {
 	h.agentMu.Lock()
 	h.agent = a
 	h.agentMu.Unlock()
+}
+
+// SetToolLogger 设置工具事件日志记录器
+func (h *Handler) SetToolLogger(logger *toollogger.Logger) {
+	h.toolLogger = logger
 }
 
 // RegisterRoutes 注册所有路由
@@ -86,6 +93,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.GET("/projects/:id/events", h.ListTaskEvents)
 		api.GET("/projects/:id/events/:event_id", h.GetTaskEvent)
 
+		// Tool Events (tool call logging)
+		api.POST("/projects/:id/tools", h.RecordToolEvent)
+		api.GET("/projects/:id/tools", h.ListToolEvents)
+
 		// Dispatcher management
 		api.GET("/dispatchers", h.ListDispatchers)
 		api.POST("/dispatchers", h.CreateDispatcher)
@@ -105,6 +116,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/agent/chat", h.AgentChat)
 		api.GET("/agent/config", h.GetAgentConfig)
 		api.PUT("/agent/config", h.UpdateAgentConfig)
+
+		// Project CTFd Link
+		api.GET("/projects/:id/ctfd-link", h.GetProjectCTFdLink)
 
 		// CTFd Integration
 		ctfdGroup := api.Group("/ctfd")
@@ -572,4 +586,47 @@ func (h *Handler) DeleteDispatcher(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// --- Tool Events ---
+
+func (h *Handler) RecordToolEvent(c *gin.Context) {
+	projectID := c.Param("id")
+	var event models.ToolEvent
+	if err := c.ShouldBindJSON(&event); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	event.ProjectID = projectID
+	if err := h.store.RecordToolEvent(c.Request.Context(), &event); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, event)
+}
+
+func (h *Handler) ListToolEvents(c *gin.Context) {
+	projectID := c.Param("id")
+	var filter models.ToolEventFilter
+	_ = c.ShouldBindQuery(&filter)
+
+	if h.toolLogger == nil {
+		c.JSON(http.StatusOK, []models.ToolEvent{})
+		return
+	}
+
+	limit := 100
+	if filter.Limit > 0 && filter.Limit <= 500 {
+		limit = filter.Limit
+	}
+
+	events, err := h.toolLogger.ReadByProject(projectID, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if events == nil {
+		events = []models.ToolEvent{}
+	}
+	c.JSON(http.StatusOK, events)
 }

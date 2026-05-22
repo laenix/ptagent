@@ -17,6 +17,7 @@ import (
 	"github.com/ptagent/ptagent/internal/dispatcher"
 	"github.com/ptagent/ptagent/internal/server/api"
 	"github.com/ptagent/ptagent/internal/store/sqlite"
+	"github.com/ptagent/ptagent/internal/toollogger"
 )
 
 func main() {
@@ -73,11 +74,20 @@ func main() {
 	dispManager := dispatcher.NewManager()
 	handler.SetDispatcherManager(dispManager)
 
-	// 初始化 Platform Agent（通过环境变量配置 LLM）
+	// 初始化 Platform Agent（优先从数据库加载，否则用环境变量）
 	agentCfg := &agent.Config{
 		LLMBaseURL: os.Getenv("AGENT_LLM_BASE_URL"),
 		LLMAPIKey:  os.Getenv("AGENT_LLM_API_KEY"),
 		LLMModel:   os.Getenv("AGENT_LLM_MODEL"),
+	}
+	// 从数据库加载配置（会覆盖环境变量）
+	if dbCfg, err := store.GetAgentConfig(context.Background()); err == nil && dbCfg.LLMAPIKey != "" {
+		agentCfg = &agent.Config{
+			LLMBaseURL: dbCfg.LLMBaseURL,
+			LLMAPIKey:  dbCfg.LLMAPIKey,
+			LLMModel:   dbCfg.LLMModel,
+		}
+		log.Println("Platform Agent: loaded config from database")
 	}
 	platformAgent := agent.New(store, agentCfg)
 	handler.SetPlatformAgent(platformAgent)
@@ -142,6 +152,16 @@ func main() {
 
 	// 设置自动提交 flag 回调（复用同一 platformAgent 实例）
 	d.SetAutoSubmitFunc(platformAgent.TryAutoSubmitFlag)
+
+	// 初始化工具事件日志记录器
+	toolLogger, err := toollogger.New("./data")
+	if err != nil {
+		log.Printf("Warning: failed to create tool logger: %v (tool events will not be logged)", err)
+	} else {
+		d.SetToolLogger(toolLogger)
+		handler.SetToolLogger(toolLogger)
+		log.Println("Tool event logging enabled")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

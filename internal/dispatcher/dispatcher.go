@@ -15,6 +15,7 @@ import (
 	"github.com/ptagent/ptagent/internal/config"
 	"github.com/ptagent/ptagent/internal/container"
 	"github.com/ptagent/ptagent/internal/models"
+	"github.com/ptagent/ptagent/internal/toollogger"
 	"github.com/ptagent/ptagent/internal/tools"
 	"github.com/ptagent/ptagent/internal/worker"
 	"github.com/ptagent/ptagent/internal/worker/driver"
@@ -44,6 +45,7 @@ type Dispatcher struct {
 	prompts      *PromptManager
 	containerMgr *container.Manager                                              // 容器管理器（可选，nil 时本地执行）
 	autoSubmitFn func(ctx context.Context, projectID, description string) string // 自动提交回调
+	toolLogger   *toollogger.Logger                                              // 工具事件日志
 
 	// 运行状态
 	mu                    sync.Mutex
@@ -100,12 +102,12 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 
 	// 初始化容器管理器（如果启用）
 	if cfg.Container.Enabled {
-		cm, err := container.New(&cfg.Container)
+		cm, err := container.New(&cfg.Container, cfg.Server)
 		if err != nil {
 			log.Printf("[dispatcher] container manager init failed (running in local mode): %v", err)
 		} else {
 			d.containerMgr = cm
-			log.Printf("[dispatcher] container mode enabled, image=%s", cfg.Container.Image)
+			log.Printf("[dispatcher] container mode enabled, image=%s server=%s", cfg.Container.Image, cfg.Server)
 		}
 	}
 
@@ -134,6 +136,11 @@ func New(cfg *config.DispatchConfig) (*Dispatcher, error) {
 // SetAutoSubmitFunc 设置自动提交 flag 的回调函数
 func (d *Dispatcher) SetAutoSubmitFunc(fn func(ctx context.Context, projectID, description string) string) {
 	d.autoSubmitFn = fn
+}
+
+// SetToolLogger 设置工具事件日志记录器
+func (d *Dispatcher) SetToolLogger(logger *toollogger.Logger) {
+	d.toolLogger = logger
 }
 
 // Run 启动调度主循环
@@ -225,9 +232,10 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 		d.dispatchForProject(ctx, &p, quota)
 	}
 
-	// 2. admit 新项目
+	// 2. admit 新项目（最多补充到 maxRunningProjects）
 	d.mu.Lock()
-	if d.admittedCountLocked() < d.cfg.Runtime.MaxRunningProjects {
+	targetCount := d.cfg.Runtime.MaxRunningProjects - d.admittedCountLocked()
+	if targetCount > 0 {
 		for _, p := range projects {
 			if p.Status != models.ProjectStatusActive {
 				continue
@@ -236,8 +244,11 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 				continue
 			}
 			d.admitted[p.ID] = true
+			targetCount--
 			log.Printf("[dispatcher] admitted project %s (%s)", p.ID, p.Title)
-			break
+			if targetCount <= 0 {
+				break
+			}
 		}
 	}
 	d.mu.Unlock()
@@ -246,10 +257,13 @@ func (d *Dispatcher) schedulingRound(ctx context.Context) {
 // dispatchForProject 为单个项目调度任务（可能派发多个 explore）
 // quota: 项目配额，超过则不再派发新任务
 func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSummary, quota int) {
-	log.Printf("[dispatcher] dispatchForProject called: project=%s factCount=%d intentCount=%d", p.ID, p.FactCount, p.IntentCount)
 	d.mu.Lock()
 	projectCount := d.projectWorkers[p.ID]
+	isReasoning := d.reasoning[p.ID]
+	isExploring := d.projectExploring[p.ID]
 	d.mu.Unlock()
+	log.Printf("[dispatcher] dispatchForProject: project=%s facts=%d intents=%d unclaimed=%d reason=%v reasonState=%v exploring=%v projectCount=%d quota=%d",
+		p.ID, p.FactCount, p.IntentCount, p.UnclaimedIntentCount, p.Reason != nil, isReasoning, isExploring, projectCount, quota)
 
 	// 使用配额和 MaxProjectWorkers 中的较小值作为限制
 	maxAllowed := quota
@@ -258,13 +272,13 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 	}
 
 	if projectCount >= maxAllowed {
-		log.Printf("[dispatcher] dispatchForProject: project %s at quota limit (%d >= %d), skipping", p.ID, projectCount, maxAllowed)
+		log.Printf("[dispatcher] project %s at quota limit (projectCount=%d >= maxAllowed=%d), skipping", p.ID, projectCount, maxAllowed)
 		return
 	}
 
 	// 判断项目状态决定任务类型
-	log.Printf("[dispatcher] dispatchForProject: checking project %s, isInitialState=%v, UnclaimedIntentCount=%d, Reason=%v",
-		p.ID, d.isInitialState(p), p.UnclaimedIntentCount, p.Reason)
+	log.Printf("[dispatcher] dispatchForProject: project=%s isInitial=%v unclaimed=%d reason=%v",
+		p.ID, d.isInitialState(p), p.UnclaimedIntentCount, p.Reason != nil)
 	if d.isInitialState(p) {
 		// Bootstrap - 只派遣一次，带退避重试
 		d.mu.Lock()
@@ -288,11 +302,13 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 		isReasoning := d.reasoning[p.ID]
 		d.mu.Unlock()
 		if isReasoning {
+			log.Printf("[dispatcher] project %s is in reason state, skipping explore", p.ID)
 			return // 项目已在 reason 中，等待
 		}
 
 		// 派发 explore 任务
 		if !d.canDispatch() {
+			log.Printf("[dispatcher] cannot dispatch explore: global capacity full runningTasks=%d maxWorkers=%d", d.runningTasks, d.cfg.Runtime.MaxWorkers)
 			return
 		}
 		d.mu.Lock()
@@ -308,12 +324,14 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 		hasExploring := d.projectExploring[p.ID]
 		d.mu.Unlock()
 		if hasExploring {
+			log.Printf("[dispatcher] project %s has exploring task, skipping reason", p.ID)
 			return // 项目已在 explore 中，等待
 		}
 
 		// Reason - 只有图有实质变化才触发
 		trigger := d.reasonTrigger(p)
 		if trigger == "" {
+			log.Printf("[dispatcher] reasonTrigger empty for project %s, no graph change, skipping", p.ID)
 			return
 		}
 		d.mu.Lock()
@@ -399,7 +417,17 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 	// 选择 worker
 	w := d.selectWorker(projectID, taskType)
 	if w == nil {
-		log.Printf("[dispatcher] dispatchTask: no worker available for task type %s", taskType)
+		d.mu.Lock()
+		running := d.runningTasks
+		maxW := d.cfg.Runtime.MaxWorkers
+		var workerStatus []string
+		for _, wcfg := range d.cfg.Workers {
+			if wcfg.Type == "openai" || wcfg.Type == "anthropic" {
+				workerStatus = append(workerStatus, fmt.Sprintf("%s(run=%d max=%d)", wcfg.Name, d.workerRunning[wcfg.Name], wcfg.MaxRunning))
+			}
+		}
+		d.mu.Unlock()
+		log.Printf("[dispatcher] dispatchTask: no worker for %s runningTasks=%d maxWorkers=%d workers=%v", taskType, running, maxW, workerStatus)
 		return
 	}
 
@@ -636,8 +664,30 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 				return
 			}
 			containerInfo := info
+			toolLogger := d.toolLogger
 			containerExec := func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
-				return d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
+				start := time.Now()
+				result := d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
+				durationMs := time.Since(start).Milliseconds()
+				// 记录工具调用事件
+				if toolLogger != nil {
+					argsJSON, _ := json.Marshal(args)
+					event := &models.ToolEvent{
+						ProjectID:  projectID,
+						TaskType:   string(taskType),
+						IntentID:   intentID,
+						Worker:     wName,
+						Tool:       name,
+						Args:       string(argsJSON),
+						Output:     result.Output,
+						Error:      result.Error,
+						DurationMs: durationMs,
+					}
+					if err := toolLogger.Record(event); err != nil {
+						log.Printf("[dispatcher] tool logger error: %v", err)
+					}
+				}
+				return result
 			}
 			switch typedDrv := drv.(type) {
 			case *driver.OpenAIDriver:
@@ -976,20 +1026,34 @@ func (d *Dispatcher) selectWorker(projectID string, taskType worker.TaskType) *c
 		return nil
 	}
 
-	// 按 priority 排序，同 priority 取负载最低，同负载随机
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.Priority < best.Priority {
-			best = c
-		} else if c.Priority == best.Priority {
-			cLoad := d.workerRunning[c.Name]
-			bLoad := d.workerRunning[best.Name]
-			if cLoad < bLoad || (cLoad == bLoad && rand.Float64() < 0.5) {
-				best = c
-			}
+	// 按 priority 分组，每组内按负载排序，同负载随机
+	// 先找最低 priority
+	minPriority := candidates[0].Priority
+	for _, c := range candidates {
+		if c.Priority < minPriority {
+			minPriority = c.Priority
 		}
 	}
-	return best
+	// 收集所有等于最低 priority 的候选
+	var bestCandidates []*config.WorkerConfig
+	minLoad := -1
+	for _, c := range candidates {
+		if c.Priority != minPriority {
+			continue
+		}
+		load := d.workerRunning[c.Name]
+		if minLoad < 0 || load < minLoad {
+			minLoad = load
+			bestCandidates = []*config.WorkerConfig{c}
+		} else if load == minLoad {
+			bestCandidates = append(bestCandidates, c)
+		}
+	}
+	// 同负载的 worker 中随机选一个
+	if len(bestCandidates) > 0 {
+		return bestCandidates[rand.IntN(len(bestCandidates))]
+	}
+	return candidates[0]
 }
 
 // markWorkerUnhealthy 标记 worker 不健康，指数退避（5s, 10s, 20s, ..., 最大 300s）

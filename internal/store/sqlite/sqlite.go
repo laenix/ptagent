@@ -146,6 +146,31 @@ func (s *SQLiteStore) migrate() error {
 		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
 		FOREIGN KEY (ctfd_instance_id) REFERENCES ctfd_instances(id) ON DELETE CASCADE
 	);
+
+	CREATE TABLE IF NOT EXISTS agent_config (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		llm_base_url TEXT NOT NULL DEFAULT '',
+		llm_api_key TEXT NOT NULL DEFAULT '',
+		llm_model TEXT NOT NULL DEFAULT '',
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	INSERT OR IGNORE INTO agent_config (id, llm_base_url, llm_api_key, llm_model, updated_at) VALUES (1, '', '', '', CURRENT_TIMESTAMP);
+
+	CREATE TABLE IF NOT EXISTS tool_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		project_id TEXT NOT NULL,
+		task_type TEXT NOT NULL,
+		intent_id TEXT NOT NULL DEFAULT '',
+		worker TEXT NOT NULL,
+		tool TEXT NOT NULL,
+		args TEXT NOT NULL DEFAULT '',
+		output TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_tool_events_project ON tool_events(project_id, created_at);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -1111,4 +1136,82 @@ func (s *SQLiteStore) SetProjectAutoSubmit(ctx context.Context, projectID string
 	_, err := s.db.ExecContext(ctx,
 		"UPDATE ctfd_project_links SET auto_submit = ? WHERE project_id = ?", v, projectID)
 	return err
+}
+
+// --- Agent Config ---
+
+func (s *SQLiteStore) GetAgentConfig(ctx context.Context) (*models.AgentConfig, error) {
+	var cfg models.AgentConfig
+	err := s.db.QueryRowContext(ctx,
+		"SELECT llm_base_url, llm_api_key, llm_model FROM agent_config WHERE id = 1").
+		Scan(&cfg.LLMBaseURL, &cfg.LLMAPIKey, &cfg.LLMModel)
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (s *SQLiteStore) UpdateAgentConfig(ctx context.Context, cfg *models.AgentConfig) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE agent_config SET llm_base_url = ?, llm_api_key = ?, llm_model = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+		cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+	return err
+}
+
+// --- Tool Events ---
+
+func (s *SQLiteStore) RecordToolEvent(ctx context.Context, event *models.ToolEvent) error {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO tool_events (project_id, task_type, intent_id, worker, tool, args, output, error, duration_ms, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ProjectID, event.TaskType, event.IntentID, event.Worker, event.Tool, event.Args, event.Output, event.Error, event.DurationMs, now)
+	if err != nil {
+		return err
+	}
+	event.ID, _ = result.LastInsertId()
+	event.CreatedAt = now
+	return nil
+}
+
+func (s *SQLiteStore) ListToolEvents(ctx context.Context, projectID string, filter *models.ToolEventFilter) ([]models.ToolEvent, error) {
+	query := "SELECT id, project_id, task_type, intent_id, worker, tool, args, output, error, duration_ms, created_at FROM tool_events WHERE project_id = ?"
+	args := []interface{}{projectID}
+
+	if filter != nil {
+		if filter.Tool != "" {
+			query += " AND tool = ?"
+			args = append(args, filter.Tool)
+		}
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	limit := 100
+	offset := 0
+	if filter != nil {
+		if filter.Limit > 0 && filter.Limit <= 500 {
+			limit = filter.Limit
+		}
+		if filter.Offset > 0 {
+			offset = filter.Offset
+		}
+	}
+	query += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []models.ToolEvent
+	for rows.Next() {
+		var e models.ToolEvent
+		if err := rows.Scan(&e.ID, &e.ProjectID, &e.TaskType, &e.IntentID, &e.Worker, &e.Tool, &e.Args, &e.Output, &e.Error, &e.DurationMs, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
 }

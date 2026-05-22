@@ -1,6 +1,13 @@
 # 背景
 
-当前场景是授权的 AI 渗透测试环境。
+当前场景是授权的 AI 渗透测试环境（CTF 靶场）。
+
+## CTF 靶场说明
+
+本项目已关联一个 CTFd 靶场题目。探索方向应围绕这个具体靶机展开：
+- 使用 `get_challenge_instance_status` 查看靶机实例状态
+- 使用 `start_challenge_instance` 启动靶机（如需）
+- 找到 flag 后使用 `submit_ctfd_flag` 提交
 
 ## 任务
 

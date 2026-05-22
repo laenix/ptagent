@@ -212,6 +212,30 @@ export function getTaskEvent(projectId: string, eventId: number) {
   return api<TaskEvent>('GET', `${API_BASE}/projects/${projectId}/events/${eventId}`)
 }
 
+// --- Tool Events ---
+
+export interface ToolEvent {
+  id: number
+  project_id: string
+  task_type: string
+  intent_id: string
+  worker: string
+  tool: string
+  args: string
+  output: string
+  error: string
+  duration_ms: number
+  created_at: string
+}
+
+export function listToolEvents(projectId: string, params?: { tool?: string; limit?: number }) {
+  const qs = new URLSearchParams()
+  if (params?.tool) qs.set('tool', params.tool)
+  if (params?.limit) qs.set('limit', String(params.limit))
+  const q = qs.toString()
+  return api<ToolEvent[]>('GET', `${API_BASE}/projects/${projectId}/tools${q ? '?' + q : ''}`)
+}
+
 // --- Dispatchers ---
 
 export interface DispatcherWorkerInfo {

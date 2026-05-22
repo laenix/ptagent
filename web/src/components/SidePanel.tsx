@@ -1,6 +1,7 @@
 import { useAppStore } from '../store'
-import { useState, useEffect } from 'react'
-import type { Intent, Fact } from '../services/api'
+import { useState, useEffect, useCallback } from 'react'
+import type { Intent, Fact, ToolEvent } from '../services/api'
+import { listToolEvents } from '../services/api'
 
 function formatTime(ts: string | null) {
   if (!ts) return '—'
@@ -418,6 +419,120 @@ function LiveTab() {
   )
 }
 
+function ToolsTab() {
+  const project = useAppStore(s => s.project)
+  const [events, setEvents] = useState<ToolEvent[]>([])
+  const [loading, setLoading] = useState(false)
+  const [filter, setFilter] = useState('')
+
+  const loadEvents = useCallback(async () => {
+    if (!project?.project.id) return
+    setLoading(true)
+    try {
+      const data = await listToolEvents(project.project.id, { limit: 200 })
+      setEvents(data || [])
+    } catch (e) {
+      console.error('Failed to load tool events:', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [project?.project.id])
+
+  useEffect(() => {
+    loadEvents()
+    const interval = setInterval(loadEvents, 5000)
+    return () => clearInterval(interval)
+  }, [loadEvents])
+
+  const filtered = events.filter(e => {
+    if (filter && !e.tool.toLowerCase().includes(filter.toLowerCase()) &&
+        !e.args.toLowerCase().includes(filter.toLowerCase())) return false
+    return true
+  })
+
+  if (!project) {
+    return <p className="text-sm text-slate-300 text-center mt-12">Select a project</p>
+  }
+
+  const toolColor = (tool: string) => {
+    if (tool === 'shell_exec') return 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    if (tool === 'http_request') return 'bg-blue-50 text-blue-700 border-blue-200'
+    if (tool === 'python_exec') return 'bg-amber-50 text-amber-700 border-amber-200'
+    if (tool === 'submit_ctfd_flag') return 'bg-violet-50 text-violet-700 border-violet-200'
+    if (tool === 'start_challenge_instance' || tool === 'stop_challenge_instance') return 'bg-rose-50 text-rose-700 border-rose-200'
+    return 'bg-slate-50 text-slate-600 border-slate-200'
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Filters */}
+      <div className="flex gap-2 items-center">
+        <input value={filter} onChange={e => setFilter(e.target.value)}
+          placeholder="Search tools..."
+          className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white" />
+        <button onClick={loadEvents}
+          className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50">
+          Refresh
+        </button>
+      </div>
+
+      <div className="text-[11px] text-slate-400">
+        {filtered.length} tool calls
+      </div>
+
+      {loading && events.length === 0 ? (
+        <div className="text-center py-8 text-slate-300 text-sm">Loading...</div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-8 text-slate-300 text-sm">No tool calls yet</div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((ev, idx) => (
+            <div key={ev.id || idx} className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${toolColor(ev.tool)}`}>
+                    {ev.tool}
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-mono">{ev.duration_ms}ms</span>
+                </div>
+                <span className="text-[10px] text-slate-400">{formatTime(ev.created_at)}</span>
+              </div>
+              <div className="p-2 space-y-1.5">
+                {/* Args */}
+                {ev.args && ev.args !== '{}' && (
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase">Args</span>
+                    <pre className="mt-0.5 p-1.5 bg-slate-50 rounded text-[10px] text-slate-600 font-mono overflow-x-auto max-h-24 whitespace-pre-wrap break-all">
+                      {JSON.stringify(JSON.parse(ev.args || '{}'), null, 2)}
+                    </pre>
+                  </div>
+                )}
+                {/* Output */}
+                {ev.output && (
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase">Output</span>
+                    <pre className={`mt-0.5 p-1.5 rounded text-[10px] font-mono overflow-x-auto max-h-32 whitespace-pre-wrap break-all ${
+                      ev.error ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-700'
+                    }`}>
+                      {ev.output.length > 500 ? ev.output.slice(0, 500) + '...' : ev.output}
+                    </pre>
+                  </div>
+                )}
+                {ev.error && !ev.output && (
+                  <div>
+                    <span className="text-[10px] text-red-500 uppercase">Error</span>
+                    <p className="mt-0.5 text-[10px] text-red-500">{ev.error}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function SidePanel() {
   const sideTab = useAppStore(s => s.sideTab)
   const setSideTab = useAppStore(s => s.setSideTab)
@@ -430,7 +545,7 @@ export default function SidePanel() {
     >
       {/* Tabs */}
       <div className="flex border-b border-slate-100 shrink-0">
-        {(['detail', 'hints', 'log', 'replay', 'live'] as const).map(tab => (
+        {(['detail', 'hints', 'log', 'replay', 'tools', 'live'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setSideTab(tab)}
@@ -454,6 +569,7 @@ export default function SidePanel() {
         {sideTab === 'hints' && <HintsTab />}
         {sideTab === 'log' && <LogTab />}
         {sideTab === 'replay' && <ReplayTab />}
+        {sideTab === 'tools' && <ToolsTab />}
         {sideTab === 'live' && <LiveTab />}
       </div>
     </div>

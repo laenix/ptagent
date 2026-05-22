@@ -308,10 +308,31 @@ func (h *Handler) ImportCTFdChallenge(c *gin.Context) {
 	}
 
 	// 构造 origin
-	origin := fmt.Sprintf("[CTFd] %s (Category: %s, Value: %d pts)\n\n%s", ch.Name, ch.Category, ch.Value, ch.Description)
+	origin := fmt.Sprintf(`[CTFd Challenge]
+Name: %s
+Category: %s
+Value: %d pts
+Challenge ID: %d
+
+Description:
+%s`, ch.Name, ch.Category, ch.Value, challID, ch.Description)
 	if ch.ConnectionInfo != "" {
-		origin += "\n\nConnection Info: " + ch.ConnectionInfo
+		origin += "\n\nConnection Info:\n" + ch.ConnectionInfo
 	}
+	// 添加 CTFd API 工具说明
+	origin += fmt.Sprintf(`
+
+[靶机管理工具]
+本挑战关联到 CTFd 实例 %s，挑战 ID %d。你需要使用以下工具与靶机交互：
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| get_challenge_instance_status | 无需参数 | 查看靶机实例状态（IP、端口、是否运行） |
+| start_challenge_instance | 无需参数 | 启动靶机实例，获取连接信息 |
+| stop_challenge_instance | 无需参数 | 停止靶机实例 |
+| submit_ctfd_flag | flag 字符串 | 提交 flag（只需传入 flag 字符串） |
+
+**重要**：靶机 IP 和端口不是固定的，必须先调用 get_challenge_instance_status 或 start_challenge_instance 获取。`, instID, challID)
 
 	// 构造 hints
 	var hints []models.CreateHintParams
@@ -341,10 +362,31 @@ func (h *Handler) ImportCTFdChallenge(c *gin.Context) {
 		})
 	}
 
+	// 根据类别生成更具体的 goal
+	var goal string
+	switch ch.Category {
+	case "Web", "web", "Web Security":
+		goal = "通过 Web 渗透测试技术（代码审计、SQL注入、XSS、SSRF、文件上传等）找到并提交 flag。"
+	case "Pwn", "pwn", "Binary Exploitation":
+		goal = "通过逆向工程和漏洞利用技术（ROP、格式化字符串、堆漏洞等）获取系统 flag。"
+	case "Crypto", "crypto", "Cryptography":
+		goal = "通过密码分析技术（古典密码、侧信道攻击、加密实现漏洞等）破解加密获取 flag。"
+	case "Reverse", "reverse", "Reverse Engineering":
+		goal = "通过逆向分析（静态分析、动态调试、脱壳等）理解程序逻辑并获取 flag。"
+	case "Forensics", "forensics", "Forensic":
+		goal = "通过数字取证技术（内存分析、磁盘镜像分析、日志分析等）恢复隐藏信息获取 flag。"
+	case "OSINT", "osint":
+		goal = "通过开源情报收集技术（信息搜索、社交工程、域名查询等）找到目标信息获取 flag。"
+	case "Mobile", "mobile", "Android", "iOS":
+		goal = "通过移动应用安全测试（反编译、API 分析、协议抓包等）获取 flag。"
+	default:
+		goal = "通过渗透测试技术找到并提交 flag。靶机连接信息需通过 CTFd API 工具获取。"
+	}
+
 	req := &models.CreateProjectRequest{
 		Title:  fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
 		Origin: origin,
-		Goal:   "Find and submit the flag for this challenge.",
+		Goal:   goal,
 		Hints:  hints,
 	}
 

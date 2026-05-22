@@ -10,7 +10,7 @@
 
 ## 可用工具
 
-你有三个工具可用：
+你有多个工具可用：
 
 ### shell_exec（最常用）
 执行 shell 命令，用于运行渗透工具。
@@ -31,6 +31,16 @@
 
 ### http_request
 发送 HTTP 请求，简单场景可以用这个。
+
+### CTFd 靶场工具
+与项目关联的 CTFd 靶机交互的工具：
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `get_challenge_instance_status` | 无需参数 | 查看靶机实例状态（IP、端口、是否运行） |
+| `start_challenge_instance` | 无需参数 | 启动靶机实例 |
+| `stop_challenge_instance` | 无需参数 | 停止靶机实例 |
+| `submit_ctfd_flag` | flag 字符串 | 提交 flag 到 CTFd 系统 |
 
 ## 输出要求
 

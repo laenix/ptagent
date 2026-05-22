@@ -73,6 +73,7 @@ type ContainerConfig struct {
 	CapAdd          []string          `yaml:"cap_add"`
 	Enabled         bool              `yaml:"enabled"`   // 是否启用容器化执行
 	ProxyEnv        map[string]string `yaml:"proxy_env"` // 注入到容器的代理环境变量
+	ServerURL       string            `yaml:"server_url"` // Server API URL（注入到容器环境变量）
 }
 
 // WorkerConfig Worker 配置

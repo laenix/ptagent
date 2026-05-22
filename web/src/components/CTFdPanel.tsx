@@ -206,7 +206,7 @@ export default function CTFdPanel() {
       {/* Floating Toggle Button */}
       <button
         onClick={() => setOpen(!open)}
-        className={`fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all duration-300 ${
+        className={`fixed bottom-6 left-24 z-50 w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all duration-300 ${
           open ? 'bg-slate-700 text-white rotate-45' : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:scale-105'
         }`}
         title="CTFd Agent"
@@ -223,7 +223,7 @@ export default function CTFdPanel() {
 
       {/* Floating Panel */}
       {open && (
-        <div className="fixed bottom-24 right-6 z-50 w-[480px] max-h-[calc(100vh-8rem)] bg-white rounded-2xl shadow-2xl border border-slate-200/60 flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-200">
+        <div className="fixed bottom-24 left-6 z-50 w-[480px] max-h-[calc(100vh-8rem)] bg-white rounded-2xl shadow-2xl border border-slate-200/60 flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-200">
           {/* Header */}
           <div className="px-5 py-3.5 border-b border-slate-100 bg-gradient-to-r from-indigo-50 to-violet-50 shrink-0">
             <div className="flex items-center justify-between">
