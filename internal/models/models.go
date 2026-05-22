@@ -202,13 +202,13 @@ type TaskEventFilter struct {
 type ToolEvent struct {
 	ID         int64     `json:"id"`
 	ProjectID  string    `json:"project_id"`
-	TaskType  string    `json:"task_type"`  // bootstrap / reason / explore
+	TaskType   string    `json:"task_type"` // bootstrap / reason / explore
 	IntentID   string    `json:"intent_id,omitempty"`
-	Worker     string    `json:"worker"`    // 执行的 worker 名
-	Tool      string    `json:"tool"`      // 工具名: http_request, shell_exec, etc.
-	Args       string    `json:"args"`      // 调用参数 JSON
-	Output     string    `json:"output"`    // 执行结果
-	Error      string    `json:"error"`      // 错误信息
+	Worker     string    `json:"worker"`      // 执行的 worker 名
+	Tool       string    `json:"tool"`        // 工具名: http_request, shell_exec, etc.
+	Args       string    `json:"args"`        // 调用参数 JSON
+	Output     string    `json:"output"`      // 执行结果
+	Error      string    `json:"error"`       // 错误信息
 	DurationMs int64     `json:"duration_ms"` // 耗时
 	CreatedAt  time.Time `json:"created_at"`
 }

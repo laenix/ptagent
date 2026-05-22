@@ -64,6 +64,7 @@ type Store interface {
 	// CTFd Project Links
 	LinkProjectCTFd(ctx context.Context, link *models.CTFdProjectLink) error
 	GetProjectCTFdLink(ctx context.Context, projectID string) (*models.CTFdProjectLink, error)
+	GetCTFdProjectLinkByChallenge(ctx context.Context, instanceID string, challengeID int) (*models.CTFdProjectLink, error)
 	SetProjectAutoSubmit(ctx context.Context, projectID string, autoSubmit bool) error
 
 	// Agent Config (LLM)

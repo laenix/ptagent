@@ -160,6 +160,9 @@ func (c *Client) SubmitFlag(ctx context.Context, challengeID int, flag string) (
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
+	if !raw.Success {
+		return nil, fmt.Errorf("CTFd error: %s", raw.Message)
+	}
 
 	// CTFd attempt 的响应格式
 	var result struct {

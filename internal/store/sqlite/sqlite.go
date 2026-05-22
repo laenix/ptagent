@@ -22,7 +22,7 @@ type SQLiteStore struct {
 
 // New 创建 SQLite store
 func New(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -146,6 +146,7 @@ func (s *SQLiteStore) migrate() error {
 		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
 		FOREIGN KEY (ctfd_instance_id) REFERENCES ctfd_instances(id) ON DELETE CASCADE
 	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_ctfd_link_challenge ON ctfd_project_links(ctfd_instance_id, ctfd_challenge_id);
 
 	CREATE TABLE IF NOT EXISTS agent_config (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1109,7 +1110,7 @@ func (s *SQLiteStore) LinkProjectCTFd(ctx context.Context, link *models.CTFdProj
 		autoSubmit = 1
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO ctfd_project_links (project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit)
+		`INSERT OR IGNORE INTO ctfd_project_links (project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit)
 		 VALUES (?, ?, ?, ?)`,
 		link.ProjectID, link.CTFdInstanceID, link.CTFdChallengeID, autoSubmit)
 	return err
@@ -1121,6 +1122,21 @@ func (s *SQLiteStore) GetProjectCTFdLink(ctx context.Context, projectID string) 
 	err := s.db.QueryRowContext(ctx,
 		"SELECT project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit FROM ctfd_project_links WHERE project_id = ?",
 		projectID).Scan(&link.ProjectID, &link.CTFdInstanceID, &link.CTFdChallengeID, &autoSubmit)
+	if err != nil {
+		return nil, err
+	}
+	link.AutoSubmit = autoSubmit == 1
+	return &link, nil
+}
+
+func (s *SQLiteStore) GetCTFdProjectLinkByChallenge(ctx context.Context, instanceID string, challengeID int) (*models.CTFdProjectLink, error) {
+	var link models.CTFdProjectLink
+	var autoSubmit int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT project_id, ctfd_instance_id, ctfd_challenge_id, auto_submit
+		 FROM ctfd_project_links WHERE ctfd_instance_id = ? AND ctfd_challenge_id = ?
+		 ORDER BY project_id LIMIT 1`,
+		instanceID, challengeID).Scan(&link.ProjectID, &link.CTFdInstanceID, &link.CTFdChallengeID, &autoSubmit)
 	if err != nil {
 		return nil, err
 	}

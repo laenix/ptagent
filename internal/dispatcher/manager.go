@@ -111,6 +111,13 @@ func (m *Manager) Create(cfg *config.DispatchConfig, name string) (*InstanceInfo
 
 	m.mu.Lock()
 	id := fmt.Sprintf("disp_%03d", m.nextID)
+	for {
+		if _, exists := m.instances[id]; !exists {
+			break
+		}
+		m.nextID++
+		id = fmt.Sprintf("disp_%03d", m.nextID)
+	}
 	m.nextID++
 
 	now := time.Now()
@@ -156,8 +163,13 @@ func (m *Manager) Register(id, name string, cfg *config.DispatchConfig, d *Dispa
 		dispatcher: d,
 		cancel:     cancel,
 	}
-	// Ensure nextID doesn't collide
-	if m.nextID <= 1 {
+	// Ensure nextID doesn't collide with registered disp_NNN IDs.
+	var n int
+	if _, err := fmt.Sscanf(id, "disp_%d", &n); err == nil {
+		if n >= m.nextID {
+			m.nextID = n + 1
+		}
+	} else if m.nextID <= 1 {
 		m.nextID = 2
 	}
 }

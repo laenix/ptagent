@@ -119,7 +119,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 		// Project CTFd Link
 		api.GET("/projects/:id/ctfd-link", h.GetProjectCTFdLink)
-
 		// CTFd Integration
 		ctfdGroup := api.Group("/ctfd")
 		{
@@ -609,18 +608,7 @@ func (h *Handler) ListToolEvents(c *gin.Context) {
 	projectID := c.Param("id")
 	var filter models.ToolEventFilter
 	_ = c.ShouldBindQuery(&filter)
-
-	if h.toolLogger == nil {
-		c.JSON(http.StatusOK, []models.ToolEvent{})
-		return
-	}
-
-	limit := 100
-	if filter.Limit > 0 && filter.Limit <= 500 {
-		limit = filter.Limit
-	}
-
-	events, err := h.toolLogger.ReadByProject(projectID, limit)
+	events, err := h.store.ListToolEvents(c.Request.Context(), projectID, &filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

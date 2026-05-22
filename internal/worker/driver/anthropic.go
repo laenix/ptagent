@@ -19,13 +19,12 @@ import (
 
 // AnthropicDriver Anthropic Messages API 兼容的 Worker 驱动
 type AnthropicDriver struct {
-	name          string
-	baseURL       string
-	apiKey        string
-	model         string
-	llmClient     *http.Client
-	toolExecutor  *tools.Executor  // 本地工具执行器（fallback）
-	containerExec ToolExecutorFunc // 容器内工具执行器（优先）
+	name         string
+	baseURL      string
+	apiKey       string
+	model        string
+	llmClient    *http.Client
+	toolExecutor *tools.Executor // 本地工具执行器（fallback）
 }
 
 // NewAnthropicDriver 创建 Anthropic 驱动
@@ -56,11 +55,6 @@ func NewAnthropicDriver(name string, env map[string]string, proxyCfg *config.Pro
 		llmClient:    llmClient,
 		toolExecutor: tools.NewExecutor(proxyURL),
 	}
-}
-
-// SetContainerExecutor 设置容器内工具执行器
-func (d *AnthropicDriver) SetContainerExecutor(exec ToolExecutorFunc) {
-	d.containerExec = exec
 }
 
 func (d *AnthropicDriver) Name() string { return d.name }
@@ -400,11 +394,14 @@ func (d *AnthropicDriver) executeToolUses(ctx context.Context, toolUses []anthCo
 // execSingleTool 执行单个 Anthropic 工具调用
 func (d *AnthropicDriver) execSingleTool(ctx context.Context, tu anthContentBlock) string {
 	var args map[string]interface{}
-	json.Unmarshal(tu.Input, &args)
+	if err := json.Unmarshal(tu.Input, &args); err != nil {
+		return fmt.Sprintf("ERROR: invalid tool arguments JSON: %v", err)
+	}
 
 	var result *tools.ToolResult
-	if d.containerExec != nil {
-		result = d.containerExec(ctx, tu.Name, args)
+	// 优先使用 context 中绑定的执行器（并发安全）
+	if ctxExec := toolExecutorFromContext(ctx); ctxExec != nil {
+		result = ctxExec(ctx, tu.Name, args)
 	} else {
 		result = d.toolExecutor.Execute(ctx, tu.Name, args)
 	}

@@ -167,7 +167,14 @@ Respond in the same language as the user (Chinese or English).`
 
 			for _, tc := range choice.Message.ToolCalls {
 				var args map[string]interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+					messages = append(messages, chatMsg{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    fmt.Sprintf("ERROR: invalid arguments JSON: %v", err),
+					})
+					continue
+				}
 
 				result, action := a.executeFunction(ctx, tc.Function.Name, args)
 				if action != nil {
@@ -547,6 +554,17 @@ func (a *PlatformAgent) fnImportAllChallenges(ctx context.Context, args map[stri
 		if ch.Solved {
 			skipCount++
 			results = append(results, fmt.Sprintf("  ⏭ #%d %s (already solved)", ch.ID, ch.Name))
+			continue
+		}
+
+		// 幂等导入：已导入的 challenge 跳过
+		if existing, err := a.store.GetCTFdProjectLinkByChallenge(ctx, instanceID, ch.ID); err == nil {
+			skipCount++
+			results = append(results, fmt.Sprintf("  ⏭ #%d %s (already imported as %s)", ch.ID, ch.Name, existing.ProjectID))
+			continue
+		} else if err != nil && err != sql.ErrNoRows {
+			failCount++
+			results = append(results, fmt.Sprintf("  ❌ #%d %s (lookup failed: %v)", ch.ID, ch.Name, err))
 			continue
 		}
 

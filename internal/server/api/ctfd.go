@@ -1,6 +1,8 @@
 package api
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -304,6 +306,20 @@ func (h *Handler) ImportCTFdChallenge(c *gin.Context) {
 	ch, err := client.GetChallenge(c.Request.Context(), challID)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 幂等导入：已存在关联则直接返回
+	if existing, err := h.store.GetCTFdProjectLinkByChallenge(c.Request.Context(), instID, challID); err == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "challenge already imported",
+			"link":       existing,
+			"project_id": existing.ProjectID,
+			"challenge":  ch,
+		})
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

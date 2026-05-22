@@ -3,7 +3,6 @@ import type { ProjectSummary, ProjectDetail, Settings, DispatcherInstance, TaskE
 import * as api from '../services/api'
 
 export type LayoutMode = 'dagre_tb' | 'dagre_lr' | 'klay_tb' | 'klay_lr' | 'elk_tb' | 'elk_lr'
-export type SidePanelTab = 'detail' | 'hints' | 'log' | 'replay' | 'tools' | 'live'
 
 export interface SelectedNode {
   type: 'fact' | 'intent'
@@ -19,7 +18,7 @@ interface AppState {
   // Selection
   selectedNode: SelectedNode | null
   selectedFacts: string[]
-  sideTab: 'detail' | 'hints' | 'log' | 'replay' | 'tools' | 'live'
+  sideTab: 'detail' | 'hints' | 'log' | 'replay' | 'live'
 
   // Layout
   layoutMode: LayoutMode
@@ -68,7 +67,7 @@ interface AppState {
   setSelectedFacts: (facts: string[]) => void
   toggleFactSelection: (fid: string) => void
   clearSelection: () => void
-  setSideTab: (tab: SidePanelTab) => void
+  setSideTab: (tab: 'detail' | 'hints' | 'log' | 'replay' | 'live') => void
   setLayoutMode: (mode: LayoutMode) => void
   setSidePanelWidth: (width: number) => void
   showToast: (message: string, type?: 'info' | 'error') => void
@@ -169,7 +168,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearSelection: () => set({ selectedNode: null, selectedFacts: [] }),
 
-  setSideTab: (tab: SidePanelTab) => set({ sideTab: tab }),
+  setSideTab: (tab) => set({ sideTab: tab }),
 
   setLayoutMode: (mode) => {
     localStorage.setItem('ptagent.layoutMode', mode)

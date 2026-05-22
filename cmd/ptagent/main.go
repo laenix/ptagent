@@ -162,7 +162,6 @@ func main() {
 		handler.SetToolLogger(toolLogger)
 		log.Println("Tool event logging enabled")
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -193,8 +192,9 @@ func main() {
 }
 
 func waitForServer(url string) {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

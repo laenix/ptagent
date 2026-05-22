@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -141,7 +142,7 @@ func (e *Executor) pythonExec(ctx context.Context, args map[string]interface{}) 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, "python3", "-c", code)
+	cmd := e.buildPythonCommand(execCtx, code)
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	const maxOutput = 64 * 1024
@@ -169,7 +170,7 @@ func (e *Executor) shellExec(ctx context.Context, args map[string]interface{}) *
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
+	cmd := e.buildShellCommand(execCtx, command)
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	const maxOutput = 64 * 1024
@@ -180,6 +181,26 @@ func (e *Executor) shellExec(ctx context.Context, args map[string]interface{}) *
 		return &ToolResult{Output: result, Error: err.Error()}
 	}
 	return &ToolResult{Output: result}
+}
+
+func (e *Executor) buildPythonCommand(ctx context.Context, code string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("python"); err == nil {
+			return exec.CommandContext(ctx, "python", "-c", code)
+		}
+		return exec.CommandContext(ctx, "py", "-3", "-c", code)
+	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		return exec.CommandContext(ctx, "python3", "-c", code)
+	}
+	return exec.CommandContext(ctx, "python", "-c", code)
+}
+
+func (e *Executor) buildShellCommand(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
+	}
+	return exec.CommandContext(ctx, "bash", "-c", command)
 }
 
 // AvailableTools 返回可用工具的 OpenAI function 格式定义

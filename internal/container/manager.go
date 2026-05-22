@@ -38,10 +38,10 @@ type Manager struct {
 
 // ContainerInfo 容器信息
 type ContainerInfo struct {
-	ID               string
-	Name             string
-	CTFdInstanceID   string
-	CTFdChallengeID  int
+	ID              string
+	Name            string
+	CTFdInstanceID  string
+	CTFdChallengeID int
 }
 
 // New 创建容器管理器
@@ -264,6 +264,9 @@ func (m *Manager) dockerExec(ctx context.Context, info *ContainerInfo, cmd []str
 
 	select {
 	case <-execCtx.Done():
+		// 关闭连接以解除 io.Copy 阻塞，然后等待 goroutine 退出避免数据竞争
+		attachResp.Close()
+		<-done
 		return &tools.ToolResult{
 			Output: output.String(),
 			Error:  "execution timed out",

@@ -24,13 +24,12 @@ type ToolExecutorFunc func(ctx context.Context, name string, args map[string]int
 
 // OpenAIDriver OpenAI 兼容的 Worker 驱动
 type OpenAIDriver struct {
-	name          string
-	baseURL       string
-	apiKey        string
-	model         string
-	llmClient     *http.Client
-	toolExecutor  *tools.Executor  // 本地工具执行器（fallback）
-	containerExec ToolExecutorFunc // 容器内工具执行器（优先）
+	name         string
+	baseURL      string
+	apiKey       string
+	model        string
+	llmClient    *http.Client
+	toolExecutor *tools.Executor // 本地工具执行器（fallback）
 }
 
 // NewOpenAIDriver 创建 OpenAI 驱动
@@ -57,11 +56,6 @@ func NewOpenAIDriver(name string, env map[string]string, proxyCfg *config.ProxyC
 		llmClient:    llmClient,
 		toolExecutor: tools.NewExecutor(proxyURL),
 	}
-}
-
-// SetContainerExecutor 设置容器内工具执行器
-func (d *OpenAIDriver) SetContainerExecutor(exec ToolExecutorFunc) {
-	d.containerExec = exec
 }
 
 func (d *OpenAIDriver) Name() string { return d.name }
@@ -295,11 +289,14 @@ func (d *OpenAIDriver) Execute(ctx context.Context, task *worker.Task) (*worker.
 // executeTool 执行单个工具调用，返回输出字符串
 func (d *OpenAIDriver) executeTool(ctx context.Context, tc toolCall) string {
 	var args map[string]interface{}
-	json.Unmarshal([]byte(tc.Function.Arguments), &args)
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		return fmt.Sprintf("ERROR: invalid tool arguments JSON: %v", err)
+	}
 
 	var result *tools.ToolResult
-	if d.containerExec != nil {
-		result = d.containerExec(ctx, tc.Function.Name, args)
+	// 优先使用 context 中绑定的执行器（并发安全）
+	if ctxExec := toolExecutorFromContext(ctx); ctxExec != nil {
+		result = ctxExec(ctx, tc.Function.Name, args)
 	} else {
 		result = d.toolExecutor.Execute(ctx, tc.Function.Name, args)
 	}

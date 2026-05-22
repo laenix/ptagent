@@ -600,9 +600,16 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 			if cur, ok := d.runningTasks_[taskKey]; ok && cur.generation == gen {
 				delete(d.runningTasks_, taskKey)
 			}
-			d.runningTasks--
-			d.projectWorkers[projectID]--
-			d.workerRunning[wName]--
+			// 每个 goroutine 在注册时已计数 +1，结束时必须 -1（与 taskKey 是否被复用无关）
+			if d.runningTasks > 0 {
+				d.runningTasks--
+			}
+			if d.projectWorkers[projectID] > 0 {
+				d.projectWorkers[projectID]--
+			}
+			if d.workerRunning[wName] > 0 {
+				d.workerRunning[wName]--
+			}
 			d.mu.Unlock()
 		}()
 
@@ -654,49 +661,52 @@ func (d *Dispatcher) dispatchTask(ctx context.Context, projectID string, taskTyp
 		d.recordEvent(projectID, string(taskType), intentID, wName, "dispatched", "", "", "", 0)
 		taskStarted := time.Now()
 
-		// 为 explore 任务设置容器内工具执行器
-		if d.containerMgr != nil && taskType == worker.TaskExplore {
-			info, err := d.containerMgr.EnsureRunning(taskCtx, projectID)
-			if err != nil {
-				log.Printf("[dispatcher] container start failed for project %s: %v", projectID, err)
-				d.recordEvent(projectID, string(taskType), intentID, wName, "failed", "", "", "container start: "+err.Error(), 0)
-				d.releaseOnFailure(taskCtx, projectID, task, wName)
-				return
+		if taskType == worker.TaskExplore {
+			proxyURL := d.cfg.Proxy.HTTPSProxy
+			if proxyURL == "" {
+				proxyURL = d.cfg.Proxy.HTTPProxy
 			}
-			containerInfo := info
-			toolLogger := d.toolLogger
-			containerExec := func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
-				start := time.Now()
-				result := d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
-				durationMs := time.Since(start).Milliseconds()
-				// 记录工具调用事件
-				if toolLogger != nil {
-					argsJSON, _ := json.Marshal(args)
-					event := &models.ToolEvent{
-						ProjectID:  projectID,
-						TaskType:   string(taskType),
-						IntentID:   intentID,
-						Worker:     wName,
-						Tool:       name,
-						Args:       string(argsJSON),
-						Output:     result.Output,
-						Error:      result.Error,
-						DurationMs: durationMs,
-					}
-					if err := toolLogger.Record(event); err != nil {
-						log.Printf("[dispatcher] tool logger error: %v", err)
-					}
+			localExec := tools.NewExecutor(proxyURL)
+
+			baseExec := func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
+				return localExec.Execute(ctx, name, args)
+			}
+			if d.containerMgr != nil {
+				info, err := d.containerMgr.EnsureRunning(taskCtx, projectID)
+				if err != nil {
+					log.Printf("[dispatcher] container start failed for project %s: %v", projectID, err)
+					d.recordEvent(projectID, string(taskType), intentID, wName, "failed", "", "", "container start: "+err.Error(), 0)
+					d.releaseOnFailure(taskCtx, projectID, task, wName)
+					return
 				}
+				containerInfo := info
+				baseExec = func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
+					return d.containerMgr.ExecuteTool(ctx, containerInfo, name, args)
+				}
+			}
+
+			observedExec := func(ctx context.Context, name string, args map[string]interface{}) *tools.ToolResult {
+				start := time.Now()
+				result := baseExec(ctx, name, args)
+				if result == nil {
+					result = &tools.ToolResult{Error: "tool returned nil result"}
+				}
+				d.emitToolEvent(ctx, &models.ToolEvent{
+					ProjectID:  projectID,
+					TaskType:   string(taskType),
+					IntentID:   intentID,
+					Worker:     wName,
+					Tool:       name,
+					Args:       mustJSON(args),
+					Output:     result.Output,
+					Error:      result.Error,
+					DurationMs: time.Since(start).Milliseconds(),
+				})
 				return result
 			}
-			switch typedDrv := drv.(type) {
-			case *driver.OpenAIDriver:
-				typedDrv.SetContainerExecutor(containerExec)
-				defer typedDrv.SetContainerExecutor(nil)
-			case *driver.AnthropicDriver:
-				typedDrv.SetContainerExecutor(containerExec)
-				defer typedDrv.SetContainerExecutor(nil)
-			}
+
+			// 通过 context 注入执行器，避免修改共享 driver 实例（并发安全）
+			taskCtx = driver.WithToolExecutor(taskCtx, observedExec)
 		}
 
 		execCtx, execCancel := context.WithTimeout(taskCtx, time.Duration(task.Timeout)*time.Second)
@@ -801,6 +811,49 @@ func (d *Dispatcher) recordEvent(projectID, taskType, intentID, workerName, phas
 	if resp.StatusCode >= 400 {
 		log.Printf("[dispatcher] record event returned status %d for project %s phase %s", resp.StatusCode, projectID, phase)
 	}
+}
+
+// recordToolEvent 通过 Server API 记录工具调用事件（写入 store）
+func (d *Dispatcher) recordToolEvent(parent context.Context, projectID string, event *models.ToolEvent) {
+	if event == nil {
+		return
+	}
+	bodyBytes, _ := json.Marshal(event)
+	url := fmt.Sprintf("%s/api/projects/%s/tools", d.cfg.Server, projectID)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := d.client.Do(req)
+	if err != nil {
+		log.Printf("[dispatcher] record tool event error: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[dispatcher] record tool event returned status %d for project %s tool %s", resp.StatusCode, projectID, event.Tool)
+	}
+}
+
+func (d *Dispatcher) emitToolEvent(parent context.Context, event *models.ToolEvent) {
+	if event == nil {
+		return
+	}
+	d.recordToolEvent(parent, event.ProjectID, event)
+	if d.toolLogger == nil {
+		return
+	}
+	if err := d.toolLogger.Record(event); err != nil {
+		log.Printf("[dispatcher] tool logger error: %v", err)
+	}
+}
+
+func mustJSON(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // tryConclude 双阶段收尾
