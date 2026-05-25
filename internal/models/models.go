@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProjectStatus 项目状态
 type ProjectStatus string
@@ -13,11 +16,13 @@ const (
 
 // Project 项目 — 一个有明确起点和终点的问题实例
 type Project struct {
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
-	Status    ProjectStatus `json:"status"`
-	CreatedAt time.Time     `json:"created_at"`
-	Reason    *ReasonLease  `json:"reason"`
+	ID               string        `json:"id"`
+	Title            string        `json:"title"`
+	Status           ProjectStatus `json:"status"`
+	CreatedAt        time.Time     `json:"created_at"`
+	Reason           *ReasonLease  `json:"reason"`
+	CTFdInstanceID   string        `json:"ctfd_instance_id,omitempty"`   // CTFd 实例 ID
+	CTFdChallengeID  int           `json:"ctfd_challenge_id,omitempty"`   // CTFd 题目 ID
 }
 
 // ReasonLease 项目级 reason 租约
@@ -85,10 +90,12 @@ type Settings struct {
 
 // CreateProjectRequest 创建项目请求
 type CreateProjectRequest struct {
-	Title  string             `json:"title" binding:"required"`
-	Origin string             `json:"origin" binding:"required"`
-	Goal   string             `json:"goal" binding:"required"`
-	Hints  []CreateHintParams `json:"hints"`
+	Title            string             `json:"title" binding:"required"`
+	Origin           string             `json:"origin" binding:"required"`
+	Goal             string             `json:"goal" binding:"required"`
+	Hints            []CreateHintParams `json:"hints"`
+	CTFdInstanceID   string             `json:"ctfd_instance_id,omitempty"`
+	CTFdChallengeID  int                `json:"ctfd_challenge_id,omitempty"`
 }
 
 type CreateHintParams struct {
@@ -253,6 +260,72 @@ type CTFdChallenge struct {
 type CTFdFile struct {
 	ID       int    `json:"id"`
 	Location string `json:"location"` // 相对路径
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for CTFdChallenge.
+// CTFd API 返回的 files 字段可能是字符串（文件路径）或对象数组，需要兼容处理。
+func (c *CTFdChallenge) UnmarshalJSON(data []byte) error {
+	type challengeAlias struct {
+		ID             int           `json:"id"`
+		Name           string        `json:"name"`
+		Category       string        `json:"category"`
+		Description    string        `json:"description"`
+		Value          int           `json:"value"`
+		Solves         int           `json:"solves"`
+		Type           string        `json:"type"`
+		Tags           []string      `json:"tags"`
+		Files          interface{}   `json:"files"` // 可能是 string 或 []CTFdFile
+		Solved         bool          `json:"solved"`
+		ConnectionInfo string        `json:"connection_info"`
+		MaxAttempts    int           `json:"max_attempts"`
+		Attempts       int           `json:"attempts"`
+	}
+
+	var alias challengeAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+
+	c.ID = alias.ID
+	c.Name = alias.Name
+	c.Category = alias.Category
+	c.Description = alias.Description
+	c.Value = alias.Value
+	c.Solves = alias.Solves
+	c.Type = alias.Type
+	c.Tags = alias.Tags
+	c.Solved = alias.Solved
+	c.ConnectionInfo = alias.ConnectionInfo
+	c.MaxAttempts = alias.MaxAttempts
+	c.Attempts = alias.Attempts
+
+	// 处理 files 字段，可能是字符串或数组
+	switch f := alias.Files.(type) {
+	case string:
+		if f != "" {
+			c.Files = []CTFdFile{{Location: f}}
+		}
+	case []interface{}:
+		for _, item := range f {
+			switch fileItem := item.(type) {
+			case map[string]interface{}:
+				ctfFile := CTFdFile{}
+				if id, ok := fileItem["id"].(float64); ok {
+					ctfFile.ID = int(id)
+				}
+				if loc, ok := fileItem["location"].(string); ok {
+					ctfFile.Location = loc
+				}
+				c.Files = append(c.Files, ctfFile)
+			case string:
+				c.Files = append(c.Files, CTFdFile{Location: fileItem})
+			}
+		}
+	case []CTFdFile:
+		c.Files = f
+	}
+
+	return nil
 }
 
 // CTFdSubmitRequest 提交 flag

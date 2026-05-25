@@ -40,7 +40,11 @@
 | `get_challenge_instance_status` | 无需参数 | 查看靶机实例状态（IP、端口、是否运行） |
 | `start_challenge_instance` | 无需参数 | 启动靶机实例 |
 | `stop_challenge_instance` | 无需参数 | 停止靶机实例 |
-| `submit_ctfd_flag` | flag 字符串 | 提交 flag 到 CTFd 系统 |
+| `submit_ctfd_flag` | flag 字符串 | 提交 flag 到 CTFd 系统（**必须使用此工具，不要自己构造 HTTP 请求**） |
+
+**重要**：
+- 找到 flag 后，**必须使用 `submit_ctfd_flag` 工具提交**，不要自己用 curl 构造请求
+- 直接调用 CTFd API 会因认证问题返回 403，必须通过 `submit_ctfd_flag` 工具
 
 ## 输出要求
 

@@ -161,6 +161,7 @@ interface TimelineEvent {
   badge: string
   badgeClass: string
   dotClass: string
+  data?: Record<string, unknown>
 }
 
 function buildTimeline(project: import('../services/api').ProjectDetail): TimelineEvent[] {
@@ -404,11 +405,11 @@ function LiveTab() {
                 <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${colors.bg} ${colors.text}`}>
                   {ev.type.replace(/_/g, ' ')}
                 </span>
-                {ev.data && typeof ev.data === 'object' && (
+                {ev.data && typeof ev.data === 'object' ? (
                   <p className="text-[11px] text-slate-500 mt-0.5 break-words truncate">
                     {JSON.stringify(ev.data).slice(0, 120)}
                   </p>
-                )}
+                ) : null}
               </div>
             </div>
           )

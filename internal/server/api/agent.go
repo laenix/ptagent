@@ -78,6 +78,21 @@ func (h *Handler) UpdateAgentConfig(c *gin.Context) {
 // GetProjectCTFdLink GET /api/projects/:id/ctfd-link
 func (h *Handler) GetProjectCTFdLink(c *gin.Context) {
 	projectID := c.Param("id")
+
+	// 优先从 projects 表的 CTFd 字段获取
+	project, err := h.store.GetProject(c.Request.Context(), projectID)
+	if err == nil && project.Project.CTFdInstanceID != "" && project.Project.CTFdChallengeID != 0 {
+		link := &models.CTFdProjectLink{
+			ProjectID:       project.Project.ID,
+			CTFdInstanceID:  project.Project.CTFdInstanceID,
+			CTFdChallengeID: project.Project.CTFdChallengeID,
+			AutoSubmit:      true, // 默认开启
+		}
+		c.JSON(http.StatusOK, link)
+		return
+	}
+
+	// 兼容旧版：从 ctfd_project_links 表获取
 	link, err := h.store.GetProjectCTFdLink(c.Request.Context(), projectID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "CTFd link not found"})

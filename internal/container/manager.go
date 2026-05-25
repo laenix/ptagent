@@ -40,6 +40,7 @@ type Manager struct {
 type ContainerInfo struct {
 	ID              string
 	Name            string
+	ProjectID      string
 	CTFdInstanceID  string
 	CTFdChallengeID int
 }
@@ -97,6 +98,63 @@ func (m *Manager) fetchCTFdLink(ctx context.Context, projectID string) (*models.
 	return &link, nil
 }
 
+// resolveCTFdInfo resolves instanceID and challengeID from args, info, or API fallback.
+// Returns (instanceID, challengeID, error). If only instanceID is empty but link is found, it will be filled.
+func (m *Manager) resolveCTFdInfo(ctx context.Context, info *ContainerInfo, args map[string]interface{}) (string, int, error) {
+	instanceID, _ := args["instance_id"].(string)
+	challengeID, _ := args["challenge_id"].(float64)
+
+	// 使用容器信息中的 CTFd 配置作为默认值
+	if instanceID == "" {
+		instanceID = info.CTFdInstanceID
+	}
+	if challengeID == 0 {
+		challengeID = float64(info.CTFdChallengeID)
+	}
+
+	// 如果仍然为空，尝试从 API 获取
+	if (instanceID == "" || challengeID == 0) && info.ProjectID != "" && m.serverURL != "" {
+		if link := m.fetchProjectCTFdLink(ctx, info.ProjectID); link != nil {
+			if instanceID == "" {
+				instanceID = link.CTFdInstanceID
+			}
+			if challengeID == 0 {
+				challengeID = float64(link.CTFdChallengeID)
+			}
+		}
+	}
+
+	if instanceID == "" || challengeID == 0 {
+		return "", 0, fmt.Errorf("instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)")
+	}
+	return instanceID, int(challengeID), nil
+}
+
+// fetchProjectCTFdLink 获取项目的 CTFd link 信息（项目字段优先，回退到 ctfd_project_links 表）
+func (m *Manager) fetchProjectCTFdLink(ctx context.Context, projectID string) *models.CTFdProjectLink {
+	if m.serverURL == "" {
+		return nil
+	}
+	url := fmt.Sprintf("%s/api/projects/%s/ctfd-link", m.serverURL, projectID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var link models.CTFdProjectLink
+	if err := json.NewDecoder(resp.Body).Decode(&link); err != nil {
+		return nil
+	}
+	return &link
+}
+
 // EnsureRunning 确保项目容器运行中 (Cairn-style: sleep infinity)
 func (m *Manager) EnsureRunning(ctx context.Context, projectID string) (*ContainerInfo, error) {
 	m.mu.Lock()
@@ -118,7 +176,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, projectID string) (*Contain
 			log.Printf("[container] start existing failed: %v, recreating", err)
 			m.docker.ContainerRemove(ctx, existing, container.RemoveOptions{Force: true})
 		} else {
-			info := &ContainerInfo{ID: existing, Name: name}
+			info := &ContainerInfo{ID: existing, Name: name, ProjectID: projectID}
 			// 获取 CTFd link 信息
 			if ctfdLink, err := m.fetchCTFdLink(ctx, projectID); err == nil && ctfdLink != nil {
 				info.CTFdInstanceID = ctfdLink.CTFdInstanceID
@@ -397,7 +455,7 @@ func (m *Manager) createContainer(ctx context.Context, projectID, name string) (
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
-	info := &ContainerInfo{ID: resp.ID, Name: name}
+	info := &ContainerInfo{ID: resp.ID, Name: name, ProjectID: projectID}
 	// 获取 CTFd link 信息并返回
 	if ctfdLink, err := m.fetchCTFdLink(ctx, projectID); err == nil && ctfdLink != nil {
 		info.CTFdInstanceID = ctfdLink.CTFdInstanceID
@@ -474,7 +532,7 @@ func (m *Manager) getProjectCTFdInfo(ctx context.Context, info *ContainerInfo, a
 	}
 
 	// 查询 CTFd link
-	linkURL := fmt.Sprintf("%s/api/projects/%s/link", m.serverURL, projectID)
+	linkURL := fmt.Sprintf("%s/api/projects/%s/ctfd-link", m.serverURL, projectID)
 	linkReq, _ := http.NewRequestWithContext(ctx, "GET", linkURL, nil)
 	linkResp, err := m.httpClient.Do(linkReq)
 	if err != nil {
@@ -502,25 +560,16 @@ func (m *Manager) getProjectCTFdInfo(ctx context.Context, info *ContainerInfo, a
 
 // getChallengeInstanceStatus 获取靶机实例状态
 func (m *Manager) getChallengeInstanceStatus(ctx context.Context, info *ContainerInfo, args map[string]interface{}) *tools.ToolResult {
-	instanceID, _ := args["instance_id"].(string)
-	challengeID, _ := args["challenge_id"].(float64)
-	// 使用容器信息中的 CTFd 配置作为默认值
-	if instanceID == "" {
-		instanceID = info.CTFdInstanceID
+	instanceID, challengeID, err := m.resolveCTFdInfo(ctx, info, args)
+	if err != nil {
+		return &tools.ToolResult{Error: err.Error()}
 	}
-	if challengeID == 0 {
-		challengeID = float64(info.CTFdChallengeID)
-	}
-	if instanceID == "" || challengeID == 0 {
-		return &tools.ToolResult{Error: "instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)"}
-	}
-
 	if m.serverURL == "" {
 		return &tools.ToolResult{Error: "PTAGENT_SERVER not configured"}
 	}
 
 	url := fmt.Sprintf("%s/api/ctfd/instances/%s/challenges/%d/instance",
-		m.serverURL, instanceID, int(challengeID))
+		m.serverURL, instanceID, challengeID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return &tools.ToolResult{Error: fmt.Sprintf("create request: %v", err)}
@@ -538,25 +587,16 @@ func (m *Manager) getChallengeInstanceStatus(ctx context.Context, info *Containe
 
 // startChallengeInstance 启动靶机实例
 func (m *Manager) startChallengeInstance(ctx context.Context, info *ContainerInfo, args map[string]interface{}) *tools.ToolResult {
-	instanceID, _ := args["instance_id"].(string)
-	challengeID, _ := args["challenge_id"].(float64)
-	// 使用容器信息中的 CTFd 配置作为默认值
-	if instanceID == "" {
-		instanceID = info.CTFdInstanceID
+	instanceID, challengeID, err := m.resolveCTFdInfo(ctx, info, args)
+	if err != nil {
+		return &tools.ToolResult{Error: err.Error()}
 	}
-	if challengeID == 0 {
-		challengeID = float64(info.CTFdChallengeID)
-	}
-	if instanceID == "" || challengeID == 0 {
-		return &tools.ToolResult{Error: "instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)"}
-	}
-
 	if m.serverURL == "" {
 		return &tools.ToolResult{Error: "PTAGENT_SERVER not configured"}
 	}
 
 	url := fmt.Sprintf("%s/api/ctfd/instances/%s/challenges/%d/instance/start",
-		m.serverURL, instanceID, int(challengeID))
+		m.serverURL, instanceID, challengeID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return &tools.ToolResult{Error: fmt.Sprintf("create request: %v", err)}
@@ -574,25 +614,16 @@ func (m *Manager) startChallengeInstance(ctx context.Context, info *ContainerInf
 
 // stopChallengeInstance 停止靶机实例
 func (m *Manager) stopChallengeInstance(ctx context.Context, info *ContainerInfo, args map[string]interface{}) *tools.ToolResult {
-	instanceID, _ := args["instance_id"].(string)
-	challengeID, _ := args["challenge_id"].(float64)
-	// 使用容器信息中的 CTFd 配置作为默认值
-	if instanceID == "" {
-		instanceID = info.CTFdInstanceID
+	instanceID, challengeID, err := m.resolveCTFdInfo(ctx, info, args)
+	if err != nil {
+		return &tools.ToolResult{Error: err.Error()}
 	}
-	if challengeID == 0 {
-		challengeID = float64(info.CTFdChallengeID)
-	}
-	if instanceID == "" || challengeID == 0 {
-		return &tools.ToolResult{Error: "instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)"}
-	}
-
 	if m.serverURL == "" {
 		return &tools.ToolResult{Error: "PTAGENT_SERVER not configured"}
 	}
 
 	url := fmt.Sprintf("%s/api/ctfd/instances/%s/challenges/%d/instance/stop",
-		m.serverURL, instanceID, int(challengeID))
+		m.serverURL, instanceID, challengeID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return &tools.ToolResult{Error: fmt.Sprintf("create request: %v", err)}
@@ -610,25 +641,16 @@ func (m *Manager) stopChallengeInstance(ctx context.Context, info *ContainerInfo
 
 // renewChallengeInstance 续期靶机实例
 func (m *Manager) renewChallengeInstance(ctx context.Context, info *ContainerInfo, args map[string]interface{}) *tools.ToolResult {
-	instanceID, _ := args["instance_id"].(string)
-	challengeID, _ := args["challenge_id"].(float64)
-	// 使用容器信息中的 CTFd 配置作为默认值
-	if instanceID == "" {
-		instanceID = info.CTFdInstanceID
+	instanceID, challengeID, err := m.resolveCTFdInfo(ctx, info, args)
+	if err != nil {
+		return &tools.ToolResult{Error: err.Error()}
 	}
-	if challengeID == 0 {
-		challengeID = float64(info.CTFdChallengeID)
-	}
-	if instanceID == "" || challengeID == 0 {
-		return &tools.ToolResult{Error: "instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)"}
-	}
-
 	if m.serverURL == "" {
 		return &tools.ToolResult{Error: "PTAGENT_SERVER not configured"}
 	}
 
 	url := fmt.Sprintf("%s/api/ctfd/instances/%s/challenges/%d/instance/renew",
-		m.serverURL, instanceID, int(challengeID))
+		m.serverURL, instanceID, challengeID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return &tools.ToolResult{Error: fmt.Sprintf("create request: %v", err)}
@@ -651,25 +673,16 @@ func (m *Manager) submitCTFdFlag(ctx context.Context, info *ContainerInfo, args 
 		return &tools.ToolResult{Error: "flag is required"}
 	}
 
-	instanceID, _ := args["instance_id"].(string)
-	challengeID, _ := args["challenge_id"].(float64)
-	// 使用容器信息中的 CTFd 配置作为默认值
-	if instanceID == "" {
-		instanceID = info.CTFdInstanceID
+	instanceID, challengeID, err := m.resolveCTFdInfo(ctx, info, args)
+	if err != nil {
+		return &tools.ToolResult{Error: err.Error()}
 	}
-	if challengeID == 0 {
-		challengeID = float64(info.CTFdChallengeID)
-	}
-	if instanceID == "" || challengeID == 0 {
-		return &tools.ToolResult{Error: "instance_id and challenge_id are required (or PTAGENT_CTFD_INSTANCE_ID and PTAGENT_CTFD_CHALLENGE_ID env vars)"}
-	}
-
 	if m.serverURL == "" {
 		return &tools.ToolResult{Error: "PTAGENT_SERVER not configured"}
 	}
 
 	url := fmt.Sprintf("%s/api/ctfd/instances/%s/challenges/%d/submit",
-		m.serverURL, instanceID, int(challengeID))
+		m.serverURL, instanceID, challengeID)
 
 	payload := map[string]string{"flag": flag}
 	payloadBytes, _ := json.Marshal(payload)

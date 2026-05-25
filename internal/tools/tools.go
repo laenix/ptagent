@@ -64,6 +64,18 @@ func (e *Executor) Execute(ctx context.Context, name string, args map[string]int
 		return e.shellExec(ctx, args)
 	case "python_exec":
 		return e.pythonExec(ctx, args)
+	case "get_challenge_instance_status":
+		return &ToolResult{Error: "get_challenge_instance_status requires container mode"}
+	case "start_challenge_instance":
+		return &ToolResult{Error: "start_challenge_instance requires container mode"}
+	case "stop_challenge_instance":
+		return &ToolResult{Error: "stop_challenge_instance requires container mode"}
+	case "renew_challenge_instance":
+		return &ToolResult{Error: "renew_challenge_instance requires container mode"}
+	case "submit_ctfd_flag":
+		return &ToolResult{Error: "submit_ctfd_flag requires container mode"}
+	case "get_project_ctfd_info":
+		return &ToolResult{Error: "get_project_ctfd_info requires container mode"}
 	default:
 		return &ToolResult{Error: fmt.Sprintf("unknown tool: %s", name)}
 	}
@@ -274,6 +286,67 @@ func AvailableTools() []map[string]interface{} {
 						},
 					},
 					"required": []string{"code"},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "get_challenge_instance_status",
+				"description": "Get the status of the CTFd challenge instance (靶机) for this project. Returns IP, port, and whether it's running. This instance was automatically created when the challenge was imported.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "start_challenge_instance",
+				"description": "Start the CTFd challenge instance (靶机) for this project. The instance provides the target IP and port to attack. Returns connection information after starting.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "stop_challenge_instance",
+				"description": "Stop the CTFd challenge instance (靶机) for this project. Use when you no longer need the target.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "renew_challenge_instance",
+				"description": "Renew/extend the CTFd challenge instance (靶机) runtime. Use when the instance is about to expire but you still need it.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "submit_ctfd_flag",
+				"description": "Submit a flag to the CTFd system. Use this tool when you find a flag during exploitation. The system will verify if the flag is correct. IMPORTANT: Use this tool instead of making direct HTTP requests, as direct API calls will fail due to authentication requirements.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"flag": map[string]interface{}{
+							"type":        "string",
+							"description": "The flag string to submit, e.g. 'flag{something}' or 'moectf{...}'",
+						},
+					},
+					"required": []string{"flag"},
 				},
 			},
 		},

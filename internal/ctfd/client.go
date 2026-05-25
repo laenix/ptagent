@@ -156,6 +156,15 @@ func (c *Client) SubmitFlag(ctx context.Context, challengeID int, flag string) (
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+
+	// CTFd API 返回非 200 时提供更详细的错误信息
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("CTFd API 403 Forbidden: 认证失败，请检查 CTFd 实例的 API Token 是否有效")
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("CTFd API 401 Unauthorized: 未授权，请检查 CTFd 实例的 API Token")
+	}
+
 	var raw ctfdResp
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)

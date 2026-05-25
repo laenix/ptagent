@@ -61,7 +61,9 @@ func (s *SQLiteStore) migrate() error {
 		reason_worker TEXT,
 		reason_trigger TEXT,
 		reason_started_at DATETIME,
-		reason_last_heartbeat_at DATETIME
+		reason_last_heartbeat_at DATETIME,
+		ctfd_instance_id TEXT,
+		ctfd_challenge_id INTEGER
 	);
 
 	CREATE TABLE IF NOT EXISTS facts (
@@ -198,6 +200,7 @@ func (s *SQLiteStore) ListProjects(ctx context.Context) ([]models.ProjectSummary
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.id, p.title, p.status, p.created_at,
 			p.reason_worker, p.reason_trigger, p.reason_started_at, p.reason_last_heartbeat_at,
+			p.ctfd_instance_id, p.ctfd_challenge_id,
 			(SELECT COUNT(*) FROM facts WHERE project_id = p.id) as fact_count,
 			(SELECT COUNT(*) FROM intents WHERE project_id = p.id) as intent_count,
 			(SELECT COUNT(*) FROM intents WHERE project_id = p.id AND to_fact IS NULL AND worker IS NOT NULL) as working_count,
@@ -214,9 +217,12 @@ func (s *SQLiteStore) ListProjects(ctx context.Context) ([]models.ProjectSummary
 		var ps models.ProjectSummary
 		var rWorker, rTrigger sql.NullString
 		var rStarted, rHeartbeat sql.NullTime
+		var ctfdInstanceID sql.NullString
+		var ctfdChallengeID sql.NullInt64
 		err := rows.Scan(
 			&ps.ID, &ps.Title, &ps.Status, &ps.CreatedAt,
 			&rWorker, &rTrigger, &rStarted, &rHeartbeat,
+			&ctfdInstanceID, &ctfdChallengeID,
 			&ps.FactCount, &ps.IntentCount, &ps.WorkingIntentCount,
 			&ps.UnclaimedIntentCount, &ps.HintCount,
 		)
@@ -230,6 +236,12 @@ func (s *SQLiteStore) ListProjects(ctx context.Context) ([]models.ProjectSummary
 				StartedAt:       rStarted.Time,
 				LastHeartbeatAt: rHeartbeat.Time,
 			}
+		}
+		if ctfdInstanceID.Valid {
+			ps.CTFdInstanceID = ctfdInstanceID.String
+		}
+		if ctfdChallengeID.Valid {
+			ps.CTFdChallengeID = int(ctfdChallengeID.Int64)
 		}
 		projects = append(projects, ps)
 	}
@@ -247,8 +259,8 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, req *models.CreateProje
 	now := time.Now().UTC()
 
 	_, err = tx.ExecContext(ctx,
-		"INSERT INTO projects (id, title, status, created_at) VALUES (?, ?, 'active', ?)",
-		id, strings.TrimSpace(req.Title), now)
+		"INSERT INTO projects (id, title, status, created_at, ctfd_instance_id, ctfd_challenge_id) VALUES (?, ?, 'active', ?, ?, ?)",
+		id, strings.TrimSpace(req.Title), now, req.CTFdInstanceID, req.CTFdChallengeID)
 	if err != nil {
 		return nil, err
 	}
@@ -283,10 +295,12 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, req *models.CreateProje
 	}
 
 	return &models.Project{
-		ID:        id,
-		Title:     req.Title,
-		Status:    models.ProjectStatusActive,
-		CreatedAt: now,
+		ID:               id,
+		Title:            req.Title,
+		Status:           models.ProjectStatusActive,
+		CreatedAt:        now,
+		CTFdInstanceID:   req.CTFdInstanceID,
+		CTFdChallengeID:  req.CTFdChallengeID,
 	}, nil
 }
 
@@ -294,10 +308,12 @@ func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*models.Projec
 	var p models.Project
 	var rWorker, rTrigger sql.NullString
 	var rStarted, rHeartbeat sql.NullTime
+	var ctfdInstanceID sql.NullString
+	var ctfdChallengeID sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, title, status, created_at, reason_worker, reason_trigger, reason_started_at, reason_last_heartbeat_at FROM projects WHERE id = ?", id).
-		Scan(&p.ID, &p.Title, &p.Status, &p.CreatedAt, &rWorker, &rTrigger, &rStarted, &rHeartbeat)
+		"SELECT id, title, status, created_at, reason_worker, reason_trigger, reason_started_at, reason_last_heartbeat_at, ctfd_instance_id, ctfd_challenge_id FROM projects WHERE id = ?", id).
+		Scan(&p.ID, &p.Title, &p.Status, &p.CreatedAt, &rWorker, &rTrigger, &rStarted, &rHeartbeat, &ctfdInstanceID, &ctfdChallengeID)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +324,12 @@ func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*models.Projec
 			StartedAt:       rStarted.Time,
 			LastHeartbeatAt: rHeartbeat.Time,
 		}
+	}
+	if ctfdInstanceID.Valid {
+		p.CTFdInstanceID = ctfdInstanceID.String
+	}
+	if ctfdChallengeID.Valid {
+		p.CTFdChallengeID = int(ctfdChallengeID.Int64)
 	}
 
 	// Facts

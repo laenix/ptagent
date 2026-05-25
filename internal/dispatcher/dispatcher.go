@@ -296,52 +296,70 @@ func (d *Dispatcher) dispatchForProject(ctx context.Context, p *models.ProjectSu
 		if !already {
 			d.dispatchTask(ctx, p.ID, worker.TaskBootstrap)
 		}
-	} else if p.UnclaimedIntentCount > 0 {
-		// Explore - 检查项目是否已有其他方向的任务在运行
-		d.mu.Lock()
-		isReasoning := d.reasoning[p.ID]
-		d.mu.Unlock()
-		if isReasoning {
-			log.Printf("[dispatcher] project %s is in reason state, skipping explore", p.ID)
-			return // 项目已在 reason 中，等待
+	} else {
+		// 获取 fresh detail 来判断任务类型（避免 p.UnclaimedIntentCount 过时问题）
+		freshDetail, err := d.getProjectDetail(ctx, p.ID)
+		if err != nil {
+			log.Printf("[dispatcher] get project detail error: %v", err)
+			return
 		}
 
-		// 派发 explore 任务
-		if !d.canDispatch() {
-			log.Printf("[dispatcher] cannot dispatch explore: global capacity full runningTasks=%d maxWorkers=%d", d.runningTasks, d.cfg.Runtime.MaxWorkers)
-			return
-		}
-		d.mu.Lock()
-		pc := d.projectWorkers[p.ID]
-		d.mu.Unlock()
-		if pc >= maxAllowed {
-			return
-		}
-		d.dispatchTask(ctx, p.ID, worker.TaskExplore)
-	} else if p.Reason == nil {
-		// Reason - 检查项目是否已有 Explore 在运行
-		d.mu.Lock()
-		hasExploring := d.projectExploring[p.ID]
-		d.mu.Unlock()
-		if hasExploring {
-			log.Printf("[dispatcher] project %s has exploring task, skipping reason", p.ID)
-			return // 项目已在 explore 中，等待
+		// 检查是否有未认领的 intent
+		hasUnclaimed := false
+		for _, intent := range freshDetail.Intents {
+			if intent.IsOpen() && !intent.IsClaimed() && !d.exploringIntents[intent.ID] {
+				hasUnclaimed = true
+				break
+			}
 		}
 
-		// Reason - 只有图有实质变化才触发
-		trigger := d.reasonTrigger(p)
-		if trigger == "" {
-			log.Printf("[dispatcher] reasonTrigger empty for project %s, no graph change, skipping", p.ID)
-			return
-		}
-		d.mu.Lock()
-		alreadyReasoning := d.reasoning[p.ID]
-		if !alreadyReasoning {
-			d.reasoning[p.ID] = true
-		}
-		d.mu.Unlock()
-		if !alreadyReasoning {
-			d.dispatchTask(ctx, p.ID, worker.TaskReason, trigger)
+		if hasUnclaimed {
+			// Explore - 检查项目是否已有其他方向的任务在运行
+			d.mu.Lock()
+			isReasoning := d.reasoning[p.ID]
+			d.mu.Unlock()
+			if isReasoning {
+				log.Printf("[dispatcher] project %s is in reason state, skipping explore", p.ID)
+				return
+			}
+
+			// 派发 explore 任务
+			if !d.canDispatch() {
+				log.Printf("[dispatcher] cannot dispatch explore: global capacity full runningTasks=%d maxWorkers=%d", d.runningTasks, d.cfg.Runtime.MaxWorkers)
+				return
+			}
+			d.mu.Lock()
+			pc := d.projectWorkers[p.ID]
+			d.mu.Unlock()
+			if pc >= maxAllowed {
+				return
+			}
+			d.dispatchTask(ctx, p.ID, worker.TaskExplore)
+		} else if p.Reason == nil {
+			// Reason - 检查项目是否已有 Explore 在运行
+			d.mu.Lock()
+			hasExploring := d.projectExploring[p.ID]
+			d.mu.Unlock()
+			if hasExploring {
+				log.Printf("[dispatcher] project %s has exploring task, skipping reason", p.ID)
+				return
+			}
+
+			// Reason - 只有图有实质变化才触发
+			trigger := d.reasonTrigger(p)
+			if trigger == "" {
+				log.Printf("[dispatcher] reasonTrigger empty for project %s, no graph change, skipping", p.ID)
+				return
+			}
+			d.mu.Lock()
+			alreadyReasoning := d.reasoning[p.ID]
+			if !alreadyReasoning {
+				d.reasoning[p.ID] = true
+			}
+			d.mu.Unlock()
+			if !alreadyReasoning {
+				d.dispatchTask(ctx, p.ID, worker.TaskReason, trigger)
+			}
 		}
 	}
 }
@@ -385,8 +403,9 @@ func (d *Dispatcher) reasonTrigger(p *models.ProjectSummary) string {
 	if p.HintCount > cp.hintCount {
 		changes = append(changes, fmt.Sprintf("hints:%d->%d", cp.hintCount, p.HintCount))
 	}
-	if cp.openIntentCount > 0 && openIntentCount == 0 {
-		changes = append(changes, fmt.Sprintf("open_intents:%d->0", cp.openIntentCount))
+	// 只要有 intent 被 concluded（openIntentCount 减少）就触发 Reason
+	if openIntentCount < cp.openIntentCount {
+		changes = append(changes, fmt.Sprintf("open_intents:%d->%d", cp.openIntentCount, openIntentCount))
 	}
 	if len(changes) == 0 {
 		return ""

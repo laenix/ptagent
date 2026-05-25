@@ -602,10 +602,12 @@ func (a *PlatformAgent) fnImportAllChallenges(ctx context.Context, args map[stri
 		}
 
 		req := &models.CreateProjectRequest{
-			Title:  fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
-			Origin: origin,
-			Goal:   "Find and submit the flag for this challenge.",
-			Hints:  hints,
+			Title:           fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
+			Origin:          origin,
+			Goal:            "Find and submit the flag for this challenge.",
+			Hints:           hints,
+			CTFdInstanceID:  instanceID,
+			CTFdChallengeID: ch.ID,
 		}
 
 		project, err := a.store.CreateProject(ctx, req)

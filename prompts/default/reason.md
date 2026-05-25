@@ -9,6 +9,8 @@
 - 使用 `start_challenge_instance` 启动靶机（如需）
 - 找到 flag 后使用 `submit_ctfd_flag` 提交
 
+**重要**：提交 flag 必须使用 `submit_ctfd_flag` 工具，不要自己构造 HTTP 请求。直接调用 CTFd API 会因认证问题返回 403。
+
 ## 任务
 
 你当前只做 `reason`。你要同时判断两件事：

@@ -400,10 +400,12 @@ Description:
 	}
 
 	req := &models.CreateProjectRequest{
-		Title:  fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
-		Origin: origin,
-		Goal:   goal,
-		Hints:  hints,
+		Title:           fmt.Sprintf("[%s] %s", ch.Category, ch.Name),
+		Origin:          origin,
+		Goal:            goal,
+		Hints:           hints,
+		CTFdInstanceID:  instID,
+		CTFdChallengeID: challID,
 	}
 
 	project, err := h.store.CreateProject(c.Request.Context(), req)

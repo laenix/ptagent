@@ -34,7 +34,7 @@ services:
     command: ["/app/ptagent-dispatcher", "--config", "/app/configs/dispatch.yaml"]
     restart: unless-stopped
     environment:
-      - PTAGENT_SERVER=http://server:8000
+      - PTAGENT_SERVER=http://host.docker.internal:8000
 
   # Pre-build Kali worker image (used by dispatcher to create containers)
   worker:
